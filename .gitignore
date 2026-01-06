@@ -149,3 +149,5 @@ backend/.venv/
 
 # OS files
 .DS_Store
+.venv/
+backend/.venv/
