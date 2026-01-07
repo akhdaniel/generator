@@ -1,4 +1,5 @@
 import React, { useMemo, useState, useContext, useEffect, useRef } from "react";
+import { toPng } from "html-to-image";
 import ReactFlow, {
   Background,
   BaseEdge,
@@ -610,6 +611,10 @@ const App = () => {
   const [authMode, setAuthMode] = useState("login");
   const [authForm, setAuthForm] = useState({ email: "", password: "" });
   const [authError, setAuthError] = useState("");
+  const [fileMenuOpen, setFileMenuOpen] = useState(false);
+  const [generateMenuOpen, setGenerateMenuOpen] = useState(false);
+  const [showSaveModal, setShowSaveModal] = useState(false);
+  const [saveName, setSaveName] = useState("");
   const { diagrams, saveDiagram, removeDiagram, refreshDiagrams } = useRemoteDiagrams(auth?.token);
   const [diagramName, setDiagramName] = useState("My Diagram");
   const [showOpenModal, setShowOpenModal] = useState(false);
@@ -631,8 +636,18 @@ const App = () => {
   const [conversationId, setConversationId] = useState(null);
   const chatEndRef = useRef(null);
   const layoutRef = useRef(null);
+  const diagramRef = useRef(null);
   const [diagramWidth, setDiagramWidth] = useState(70);
   const isResizingRef = useRef(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [exportError, setExportError] = useState("");
+  const [generateModalOpen, setGenerateModalOpen] = useState(false);
+  const [generateResult, setGenerateResult] = useState("");
+  const [generateError, setGenerateError] = useState("");
+  const [generateLoading, setGenerateLoading] = useState(false);
+  const [generateMode, setGenerateMode] = useState("");
+  const [generateFiles, setGenerateFiles] = useState([]);
+  const [generateDownloadUrl, setGenerateDownloadUrl] = useState("");
 
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
@@ -647,7 +662,7 @@ const App = () => {
     }
   };
 
-  const handleAuthSubmit = async () => {
+  const handleAuthSubmit = async (modeOverride) => {
     setAuthError("");
     const email = authForm.email.trim();
     const password = authForm.password.trim();
@@ -656,7 +671,8 @@ const App = () => {
       return;
     }
     const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
-    const endpoint = authMode === "signup" ? "/api/auth/signup" : "/api/auth/login";
+    const mode = modeOverride || authMode;
+    const endpoint = mode === "signup" ? "/api/auth/signup" : "/api/auth/login";
     try {
       const res = await fetch(`${apiBase}${endpoint}`, {
         method: "POST",
@@ -679,6 +695,27 @@ const App = () => {
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [chatMessages]);
+
+  useEffect(() => {
+    if (!fileMenuOpen) return;
+    const handleClick = () => setFileMenuOpen(false);
+    window.addEventListener("click", handleClick);
+    return () => window.removeEventListener("click", handleClick);
+  }, [fileMenuOpen]);
+
+  useEffect(() => {
+    if (!generateMenuOpen) return;
+    const handleClick = () => setGenerateMenuOpen(false);
+    window.addEventListener("click", handleClick);
+    return () => window.removeEventListener("click", handleClick);
+  }, [generateMenuOpen]);
+
+  useEffect(() => {
+    if (!exportMenuOpen) return;
+    const handleClick = () => setExportMenuOpen(false);
+    window.addEventListener("click", handleClick);
+    return () => window.removeEventListener("click", handleClick);
+  }, [exportMenuOpen]);
 
   useEffect(() => {
     const handleMouseMove = (event) => {
@@ -788,19 +825,21 @@ const App = () => {
     );
   };
 
-  const saveCurrent = () => {
+  const saveCurrent = (nameOverride) => {
     if (!auth?.token) {
       setAuthMode("login");
       setAuthError("Please log in to save diagrams");
       setAuthModalOpen(true);
       return;
     }
+    const resolvedName = (nameOverride || diagramName || "Untitled").trim();
     const payload = {
       nodes,
       edges,
       chatMessages
     };
-    saveDiagram(diagramName || "Untitled", payload);
+    saveDiagram(resolvedName, payload);
+    setDiagramName(resolvedName);
   };
 
   const loadDiagram = (name) => {
@@ -863,6 +902,134 @@ const App = () => {
         position: { x: startX + col * gapX, y: startY + row * gapY }
       };
     });
+  };
+
+  const exportPng = async () => {
+    setExportError("");
+    if (!diagramRef.current) {
+      setExportError("Diagram area not available");
+      return;
+    }
+    try {
+      const dataUrl = await toPng(diagramRef.current, {
+        cacheBust: true,
+        pixelRatio: 2,
+        backgroundColor: "#0b1224"
+      });
+      const link = document.createElement("a");
+      link.download = `${diagramName || "diagram"}.png`;
+      link.href = dataUrl;
+      link.click();
+    } catch (err) {
+      setExportError("Failed to export PNG");
+    }
+  };
+
+  const exportPdf = async () => {
+    setExportError("");
+    if (!diagramRef.current) {
+      setExportError("Diagram area not available");
+      return;
+    }
+    try {
+      const dataUrl = await toPng(diagramRef.current, {
+        cacheBust: true,
+        pixelRatio: 2,
+        backgroundColor: "#0b1224"
+      });
+      const printWindow = window.open("", "_blank");
+      if (!printWindow) {
+        setExportError("Popup blocked. Allow popups to export PDF.");
+        return;
+      }
+      printWindow.document.write(`
+        <html>
+          <head><title>${diagramName || "diagram"}</title></head>
+          <body style="margin:0; padding:20px; background:#0b1224;">
+            <img src="${dataUrl}" style="width:100%; height:auto;" />
+          </body>
+        </html>
+      `);
+      printWindow.document.close();
+      printWindow.focus();
+      printWindow.print();
+    } catch (err) {
+      setExportError("Failed to export PDF");
+    }
+  };
+
+  const requestGenerate = async (mode) => {
+    if (!auth?.token) {
+      setAuthMode("login");
+      setAuthError("Please log in to generate output");
+      setAuthModalOpen(true);
+      return;
+    }
+    setGenerateLoading(true);
+    setGenerateError("");
+    setGenerateResult("");
+    setGenerateFiles([]);
+    setGenerateDownloadUrl("");
+    setGenerateMode(mode);
+    const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+    try {
+      const res = await fetch(`${apiBase}/api/generate`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${auth.token}`
+        },
+        body: JSON.stringify({
+          type: mode,
+          diagram: { nodes, edges, chatMessages }
+        })
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      setGenerateResult(data.result || "");
+      setGenerateFiles(data.files || []);
+      setGenerateDownloadUrl(data.download_url || "");
+      setGenerateModalOpen(true);
+    } catch (err) {
+      setGenerateError(err.message || "Failed to generate output");
+      setGenerateModalOpen(true);
+    } finally {
+      setGenerateLoading(false);
+    }
+  };
+
+  const downloadSql = () => {
+    if (!generateResult) return;
+    const blob = new Blob([generateResult], { type: "text/sql" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${diagramName || "diagram"}.sql`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadOdooZip = async () => {
+    if (!generateDownloadUrl || !auth?.token) return;
+    const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+    try {
+      const res = await fetch(`${apiBase}${generateDownloadUrl}`, {
+        headers: { Authorization: `Bearer ${auth.token}` }
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "odoo_addon.zip";
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setGenerateError("Failed to download zip");
+    }
   };
 
   const parseDiagramPayload = (text) => {
@@ -964,69 +1131,40 @@ const App = () => {
       <div className="auth-gate">
         <div className="card auth-card">
           <h1>UML Class Diagrammer</h1>
-          <p className="muted">Log in to access your diagrams.</p>
-          <div className="auth-actions">
+          <div className="form-stack">
+            <input
+              type="email"
+              placeholder="Email"
+              value={authForm.email}
+              onChange={(e) => setAuthForm((prev) => ({ ...prev, email: e.target.value }))}
+            />
+            <input
+              type="password"
+              placeholder="Password"
+              value={authForm.password}
+              onChange={(e) => setAuthForm((prev) => ({ ...prev, password: e.target.value }))}
+            />
+            {authError && <div className="muted error-text">{authError}</div>}
             <button
-              className="small-btn secondary"
+              className="small-btn"
               onClick={() => {
                 setAuthMode("login");
-                setAuthError("");
-                setAuthModalOpen(true);
+                handleAuthSubmit("login");
               }}
             >
               Login
             </button>
             <button
-              className="small-btn"
+              className="small-btn secondary"
               onClick={() => {
                 setAuthMode("signup");
-                setAuthError("");
-                setAuthModalOpen(true);
+                handleAuthSubmit("signup");
               }}
             >
               Sign Up
             </button>
           </div>
         </div>
-        {authModalOpen && (
-          <div className="modal-backdrop" onClick={() => setAuthModalOpen(false)}>
-            <div className="modal" onClick={(e) => e.stopPropagation()}>
-              <div className="modal-header">
-                <h3>{authMode === "signup" ? "Create Account" : "Login"}</h3>
-                <button className="small-btn secondary" onClick={() => setAuthModalOpen(false)}>
-                  Close
-                </button>
-              </div>
-              <div className="form-stack">
-                <input
-                  type="email"
-                  placeholder="Email"
-                  value={authForm.email}
-                  onChange={(e) => setAuthForm((prev) => ({ ...prev, email: e.target.value }))}
-                />
-                <input
-                  type="password"
-                  placeholder="Password"
-                  value={authForm.password}
-                  onChange={(e) => setAuthForm((prev) => ({ ...prev, password: e.target.value }))}
-                />
-                {authError && <div className="muted error-text">{authError}</div>}
-                <button className="small-btn" onClick={handleAuthSubmit}>
-                  {authMode === "signup" ? "Sign Up" : "Login"}
-                </button>
-                <button
-                  className="small-btn secondary"
-                  onClick={() => {
-                    setAuthMode(authMode === "signup" ? "login" : "signup");
-                    setAuthError("");
-                  }}
-                >
-                  {authMode === "signup" ? "Have an account? Login" : "New here? Sign up"}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
     );
   }
@@ -1037,86 +1175,191 @@ const App = () => {
         <div className="title">
           <h1>UML Class Diagrammer</h1>
         </div>
-        <input
-          type="text"
-          value={diagramName}
-          onChange={(e) => setDiagramName(e.target.value)}
-          placeholder="Diagram name"
-        />
-        <button onClick={clearAll}>New</button>
-        <button onClick={saveCurrent}>Save</button>
-        <button onClick={() => setNodes((prev) => rearrangeNodes(prev))}>Rearange</button>
-        <button
-          onClick={() => {
-            if (!auth?.token) {
-              setAuthMode("login");
-              setAuthError("Please log in to open diagrams");
-              setAuthModalOpen(true);
-              return;
-            }
-            refreshDiagrams();
-            setShowOpenModal(true);
-          }}
-        >
-          Open...
-        </button>
-        {auth?.email ? (
-          <div className="auth-status">
-            <span className="muted">{auth.email}</span>
-            <button
-              className="small-btn secondary"
-              onClick={() => {
-                saveAuthState(null);
-                clearAll();
-              }}
-            >
-              Logout
-            </button>
-          </div>
-        ) : (
-          <div className="auth-status">
-            <button
-              className="small-btn secondary"
-              onClick={() => {
-                setAuthMode("login");
-                setAuthError("");
-                setAuthModalOpen(true);
-              }}
-            >
-              Login
-            </button>
-            <button
-              className="small-btn"
-              onClick={() => {
-                setAuthMode("signup");
-                setAuthError("");
-                setAuthModalOpen(true);
-              }}
-            >
-              Sign Up
-            </button>
-          </div>
-        )}
-        <button
-          onClick={() => {
-            if (!auth?.token) {
-              setAuthMode("login");
-              setAuthError("Please log in to delete diagrams");
-              setAuthModalOpen(true);
-              return;
-            }
-            if (diagramName && diagrams[diagramName]) {
-              removeDiagram(diagramName);
-              clearAll();
-            }
-          }}
-          style={{ marginLeft: "auto" }}
-        >
-          Delete Saved
-        </button>
+        <div className="menu">
+          <button
+            className="menu-trigger"
+            onClick={(event) => {
+              event.stopPropagation();
+              setGenerateMenuOpen(false);
+              setExportMenuOpen(false);
+              setFileMenuOpen((prev) => !prev);
+            }}
+          >
+            File ▾
+          </button>
+          {fileMenuOpen && (
+            <div className="menu-panel" onClick={(event) => event.stopPropagation()}>
+              <button
+                className="menu-item"
+                onClick={() => {
+                  clearAll();
+                  setFileMenuOpen(false);
+                }}
+              >
+                New
+              </button>
+              <button
+                className="menu-item"
+                onClick={() => {
+                  setSaveName(diagramName);
+                  setShowSaveModal(true);
+                  setFileMenuOpen(false);
+                }}
+              >
+                Save
+              </button>
+              <button
+                className="menu-item"
+                onClick={() => {
+                  if (!auth?.token) {
+                    setAuthMode("login");
+                    setAuthError("Please log in to open diagrams");
+                    setAuthModalOpen(true);
+                    setFileMenuOpen(false);
+                    return;
+                  }
+                  refreshDiagrams();
+                  setShowOpenModal(true);
+                  setFileMenuOpen(false);
+                }}
+              >
+                Open...
+              </button>
+              <button
+                className="menu-item"
+                onClick={() => {
+                  if (!auth?.token) {
+                    setAuthMode("login");
+                    setAuthError("Please log in to delete diagrams");
+                    setAuthModalOpen(true);
+                    setFileMenuOpen(false);
+                    return;
+                  }
+                  if (diagramName && diagrams[diagramName]) {
+                    removeDiagram(diagramName);
+                    clearAll();
+                  }
+                  setFileMenuOpen(false);
+                }}
+              >
+                Delete Saved
+              </button>
+            </div>
+          )}
+        </div>
+        <div className="menu">
+          <button
+            className="menu-trigger"
+            onClick={(event) => {
+              event.stopPropagation();
+              setFileMenuOpen(false);
+              setExportMenuOpen(false);
+              setGenerateMenuOpen((prev) => !prev);
+            }}
+          >
+            Generate ▾
+          </button>
+          {generateMenuOpen && (
+            <div className="menu-panel" onClick={(event) => event.stopPropagation()}>
+              <button
+                className="menu-item"
+                onClick={() => {
+                  requestGenerate("db");
+                  setGenerateMenuOpen(false);
+                }}
+              >
+                Database Structure
+              </button>
+              <button
+                className="menu-item"
+                onClick={() => {
+                  requestGenerate("odoo");
+                  setGenerateMenuOpen(false);
+                }}
+              >
+                Odoo Addon
+              </button>
+            </div>
+          )}
+        </div>
+        <div className="menu">
+          <button
+            className="menu-trigger"
+            onClick={(event) => {
+              event.stopPropagation();
+              setFileMenuOpen(false);
+              setGenerateMenuOpen(false);
+              setExportMenuOpen((prev) => !prev);
+            }}
+          >
+            Export ▾
+          </button>
+          {exportMenuOpen && (
+            <div className="menu-panel" onClick={(event) => event.stopPropagation()}>
+              <button
+                className="menu-item"
+                onClick={() => {
+                  exportPng();
+                  setExportMenuOpen(false);
+                }}
+              >
+                PNG
+              </button>
+              <button
+                className="menu-item"
+                onClick={() => {
+                  exportPdf();
+                  setExportMenuOpen(false);
+                }}
+              >
+                PDF
+              </button>
+              {exportError && <div className="muted error-text menu-error">{exportError}</div>}
+            </div>
+          )}
+        </div>
+        <div className="toolbar-right">
+          {auth?.email ? (
+            <div className="auth-status">
+              <span className="muted">{auth.email}</span>
+              <button
+                className="small-btn secondary"
+                onClick={() => {
+                  saveAuthState(null);
+                  clearAll();
+                }}
+              >
+                Logout
+              </button>
+            </div>
+          ) : (
+            <div className="auth-status">
+              <button
+                className="small-btn secondary"
+                onClick={() => {
+                  setAuthMode("login");
+                  setAuthError("");
+                  setAuthModalOpen(true);
+                }}
+              >
+                Login
+              </button>
+              <button
+                className="small-btn"
+                onClick={() => {
+                  setAuthMode("signup");
+                  setAuthError("");
+                  setAuthModalOpen(true);
+                }}
+              >
+                Sign Up
+              </button>
+            </div>
+          )}
+        </div>
       </div>
       <div className="layout" ref={layoutRef}>
-        <div className="diagram-area" style={{ width: `${diagramWidth}%` }}>
+        <div className="diagram-area" ref={diagramRef} style={{ width: `${diagramWidth}%` }}>
           <EditorContext.Provider
             value={{
               editingNodeId,
@@ -1181,9 +1424,14 @@ const App = () => {
               }}
             >
               <Panel position="top-right">
-                <button className="fab" title="Add class" onClick={addClass}>
-                  ＋
-                </button>
+                <div className="fab-group">
+                  <button className="fab secondary" title="Rearrange" onClick={() => setNodes((prev) => rearrangeNodes(prev))}>
+                    ↻
+                  </button>
+                  <button className="fab" title="Add class" onClick={addClass}>
+                    ＋
+                  </button>
+                </div>
               </Panel>
               <Background gap={24} color="rgba(255,255,255,0.08)" />
               <Controls />
@@ -1256,6 +1504,68 @@ const App = () => {
                   </div>
                 ))}
               </div>
+            )}
+          </div>
+        </div>
+      )}
+      {showSaveModal && (
+        <div className="modal-backdrop" onClick={() => setShowSaveModal(false)}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Save Diagram</h3>
+              <button className="small-btn secondary" onClick={() => setShowSaveModal(false)}>
+                Close
+              </button>
+            </div>
+            <div className="form-stack">
+              <input
+                type="text"
+                placeholder="Diagram name"
+                value={saveName}
+                onChange={(e) => setSaveName(e.target.value)}
+              />
+              <button
+                className="small-btn"
+                onClick={() => {
+                  saveCurrent(saveName);
+                  setShowSaveModal(false);
+                }}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {generateModalOpen && (
+        <div className="modal-backdrop" onClick={() => setGenerateModalOpen(false)}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Generated Output</h3>
+              <button className="small-btn secondary" onClick={() => setGenerateModalOpen(false)}>
+                Close
+              </button>
+            </div>
+            {generateLoading && <p className="muted">Generating...</p>}
+            {generateError && <div className="muted error-text">{generateError}</div>}
+            {!generateLoading && !generateError && (
+              <>
+                <textarea className="output-area" readOnly value={generateResult} rows={12} />
+                {generateMode === "db" && (
+                  <div className="modal-actions">
+                    <button className="small-btn secondary" onClick={downloadSql}>
+                      Download SQL
+                    </button>
+                  </div>
+                )}
+                {generateMode === "odoo" && generateDownloadUrl && (
+                  <div className="modal-actions">
+                    <button className="small-btn secondary" onClick={downloadOdooZip}>
+                      Download Odoo Zip
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>
