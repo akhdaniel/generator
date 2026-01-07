@@ -23,8 +23,7 @@ logging.basicConfig(level=logging.INFO)
 DB_PATH = os.getenv("DIAGRAM_DB_PATH", os.path.join(os.path.dirname(__file__), "diagrams.db"))
 ODOO_VERSION = os.getenv("ODOO_VERSION", "17")
 SQL_DIALECT = os.getenv("SQL_DIALECT", "postgresql")
-TEMPLATE_ROOT = Path(os.path.dirname(__file__)) / "templates" / "odoo"
-SQL_TEMPLATE_ROOT = Path(os.path.dirname(__file__)) / "templates" / "sql"
+TEMPLATE_ROOT = Path(os.path.dirname(__file__)) / "templates"
 SYSTEM_PROMPT = """
 You are a UML Class Diagram Generator.
 YOUR TASK: Convert the user's description into a raw JSON structure representing a UML class diagram for the frontend renderer.
@@ -124,22 +123,41 @@ class DiagramPayload(BaseModel):
 class AuthRequest(BaseModel):
     email: str
     password: str
+    name: Optional[str] = None
 
 
 class AuthResponse(BaseModel):
     token: str
     email: str
+    name: Optional[str] = None
+    credits: int = 0
+
+
+class UserProfileResponse(BaseModel):
+    email: str
+    name: Optional[str] = None
+    credits: int = 0
 
 
 class GenerateRequest(BaseModel):
     type: str
     diagram: DiagramPayload
+    template: Optional[str] = None
 
 
 class GenerateResponse(BaseModel):
     result: str
     files: Optional[list] = None
     download_url: Optional[str] = None
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class TopUpRequest(BaseModel):
+    amount: int
 
 
 def get_db_connection():
@@ -158,10 +176,19 @@ def init_db():
                 email TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
                 password_salt TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                name TEXT,
+                credits INTEGER NOT NULL DEFAULT 0
             )
             """
         )
+        user_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()
+        }
+        if "name" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN name TEXT")
+        if "credits" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN credits INTEGER NOT NULL DEFAULT 0")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS sessions (
@@ -251,7 +278,7 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
     try:
         row = conn.execute(
             """
-            SELECT users.id, users.email
+            SELECT users.id, users.email, users.name, users.credits
             FROM sessions
             JOIN users ON users.id = sessions.user_id
             WHERE sessions.token = ?
@@ -260,7 +287,12 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
         ).fetchone()
         if not row:
             raise HTTPException(status_code=401, detail="Invalid token")
-        return {"id": row["id"], "email": row["email"]}
+        return {
+            "id": row["id"],
+            "email": row["email"],
+            "name": row["name"],
+            "credits": row["credits"] or 0
+        }
     finally:
         conn.close()
 
@@ -311,21 +343,29 @@ async def signup(req: AuthRequest):
     email = req.email.strip().lower()
     if not email or not req.password:
         raise HTTPException(status_code=400, detail="Email and password required")
+    name = (req.name or "").strip() or email.split("@", 1)[0]
     salt = secrets.token_hex(16)
     pwd_hash = hash_password(req.password, salt)
     conn = get_db_connection()
     try:
         try:
             conn.execute(
-                "INSERT INTO users (email, password_hash, password_salt, created_at) VALUES (?, ?, ?, ?)",
-                (email, pwd_hash, salt, datetime.utcnow().isoformat() + "Z"),
+                """
+                INSERT INTO users (email, password_hash, password_salt, created_at, name, credits)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (email, pwd_hash, salt, datetime.utcnow().isoformat() + "Z", name, 0),
             )
         except sqlite3.IntegrityError:
             raise HTTPException(status_code=409, detail="Email already exists")
-        user_id = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()["id"]
+        user_row = conn.execute(
+            "SELECT id, name, credits FROM users WHERE email = ?",
+            (email,)
+        ).fetchone()
+        user_id = user_row["id"]
         token = create_session(conn, user_id)
         conn.commit()
-        return AuthResponse(token=token, email=email)
+        return AuthResponse(token=token, email=email, name=user_row["name"], credits=user_row["credits"] or 0)
     finally:
         conn.close()
 
@@ -338,7 +378,7 @@ async def login(req: AuthRequest):
     conn = get_db_connection()
     try:
         row = conn.execute(
-            "SELECT id, password_hash, password_salt FROM users WHERE email = ?",
+            "SELECT id, password_hash, password_salt, name, credits FROM users WHERE email = ?",
             (email,),
         ).fetchone()
         if not row:
@@ -349,7 +389,68 @@ async def login(req: AuthRequest):
             raise HTTPException(status_code=401, detail="Invalid credentials")
         token = create_session(conn, row["id"])
         conn.commit()
-        return AuthResponse(token=token, email=email)
+        return AuthResponse(token=token, email=email, name=row["name"], credits=row["credits"] or 0)
+    finally:
+        conn.close()
+
+
+@app.get("/api/user/me", response_model=UserProfileResponse)
+async def user_profile(user=Depends(get_current_user)):
+    return UserProfileResponse(
+        email=user["email"],
+        name=user.get("name"),
+        credits=user.get("credits", 0),
+    )
+
+
+@app.post("/api/user/change-password")
+async def change_password(req: ChangePasswordRequest, user=Depends(get_current_user)):
+    if not req.current_password or not req.new_password:
+        raise HTTPException(status_code=400, detail="Current and new password required")
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            "SELECT password_hash, password_salt FROM users WHERE id = ?",
+            (user["id"],),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+        expected = row["password_hash"]
+        actual = hash_password(req.current_password, row["password_salt"])
+        if actual != expected:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        salt = secrets.token_hex(16)
+        pwd_hash = hash_password(req.new_password, salt)
+        conn.execute(
+            "UPDATE users SET password_hash = ?, password_salt = ? WHERE id = ?",
+            (pwd_hash, salt, user["id"]),
+        )
+        conn.commit()
+        return {"status": "ok"}
+    finally:
+        conn.close()
+
+
+@app.post("/api/user/topup", response_model=UserProfileResponse)
+async def top_up(req: TopUpRequest, user=Depends(get_current_user)):
+    if req.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be positive")
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            "UPDATE users SET credits = COALESCE(credits, 0) + ? WHERE id = ?",
+            (req.amount, user["id"]),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT email, name, credits FROM users WHERE id = ?",
+            (user["id"],),
+        ).fetchone()
+        return UserProfileResponse(
+            email=row["email"],
+            name=row["name"],
+            credits=row["credits"] or 0,
+        )
     finally:
         conn.close()
 
@@ -390,10 +491,12 @@ async def generate(req: GenerateRequest, user=Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="type must be 'db' or 'odoo'")
     diagram = req.diagram.dict()
     if mode == "db":
-        result = diagram_to_sql(diagram)
+        dialect = (req.template or SQL_DIALECT).strip().lower()
+        result = diagram_to_sql(diagram, dialect)
         return GenerateResponse(result=result)
+    version = (req.template or ODOO_VERSION).strip()
     temp_dir = Path(tempfile.mkdtemp(prefix="odoo_addon_"))
-    files_written = write_odoo_addon(diagram, temp_dir)
+    files_written = write_odoo_addon(diagram, temp_dir, version)
     files_sorted = sorted(files_written, key=lambda p: (p.split("/", 1)[0], p))
     zip_id = secrets.token_urlsafe(16)
     zip_path = temp_dir.with_suffix(".zip")
@@ -458,15 +561,15 @@ def odoo_field_for(typ: str) -> str:
     return "fields.Char()"
 
 
-def read_template(version: str, name: str) -> str:
-    path = TEMPLATE_ROOT / version / name
+def read_template(folder: str, name: str) -> str:
+    path = TEMPLATE_ROOT / folder / name
     if not path.exists():
         raise HTTPException(status_code=500, detail=f"Missing Odoo template: {path}")
     return path.read_text(encoding="utf-8")
 
 
 def read_sql_template(dialect: str, name: str) -> str:
-    path = SQL_TEMPLATE_ROOT / dialect / name
+    path = TEMPLATE_ROOT / f"sql-{dialect}" / name
     if not path.exists():
         raise HTTPException(status_code=500, detail=f"Missing SQL template: {path}")
     return path.read_text(encoding="utf-8")
@@ -474,23 +577,23 @@ def read_sql_template(dialect: str, name: str) -> str:
 
 def get_odoo_templates(version: str) -> dict:
     return {
-        "manifest": read_template(version, "manifest.tmpl"),
-        "model": read_template(version, "model.py.tmpl"),
-        "view": read_template(version, "view.xml.tmpl"),
-        "access": read_template(version, "access.csv.tmpl"),
+        "manifest": read_template(f"odoo-{version}", "manifest.tmpl"),
+        "model": read_template(f"odoo-{version}", "model.py.tmpl"),
+        "view": read_template(f"odoo-{version}", "view.xml.tmpl"),
+        "access": read_template(f"odoo-{version}", "access.csv.tmpl"),
         "init": "from . import models\n",
         "models_init": "from . import {model}\n",
         "access_row": "access_{model},{model},model_{model},,1,1,1,1",
     }
 
 
-def diagram_to_sql(diagram: dict) -> str:
+def diagram_to_sql(diagram: dict, dialect: str) -> str:
     nodes = diagram.get("nodes", [])
     edges = diagram.get("edges", [])
     table_map = {n["id"]: camel_to_snake(n.get("data", {}).get("name", "class")) for n in nodes}
     table_defs = {}
     foreign_keys = {table: [] for table in table_map.values()}
-    template = read_sql_template(SQL_DIALECT, "create_table.tmpl")
+    template = read_sql_template(dialect, "create_table.tmpl")
 
     for node in nodes:
         table = table_map[node["id"]]
@@ -660,8 +763,8 @@ def diagram_to_odoo(diagram: dict) -> str:
     return "\n".join(rendered)
 
 
-def write_odoo_addon(diagram: dict, root: Path) -> list:
-    templates = get_odoo_templates(ODOO_VERSION)
+def write_odoo_addon(diagram: dict, root: Path, version: str) -> list:
+    templates = get_odoo_templates(version)
     nodes = diagram.get("nodes", [])
     edges = diagram.get("edges", [])
     model_map = {n["id"]: camel_to_snake(n.get("data", {}).get("name", "class")) for n in nodes}
@@ -760,6 +863,20 @@ def write_odoo_addon(diagram: dict, root: Path) -> list:
     (root / "security" / "ir.model.access.csv").write_text(access_content, encoding="utf-8")
     files_written.append("security/ir.model.access.csv")
     return files_written
+
+
+@app.get("/api/templates")
+async def list_templates(user=Depends(get_current_user)):
+    templates = {"odoo": [], "sql": []}
+    if TEMPLATE_ROOT.exists():
+        for path in TEMPLATE_ROOT.iterdir():
+            if path.is_dir() and path.name.startswith("odoo-"):
+                templates["odoo"].append(path.name.replace("odoo-", "", 1))
+            if path.is_dir() and path.name.startswith("sql-"):
+                templates["sql"].append(path.name.replace("sql-", "", 1))
+    templates["odoo"].sort()
+    templates["sql"].sort()
+    return templates
 
 
 @app.get("/api/generate/download/{zip_id}")

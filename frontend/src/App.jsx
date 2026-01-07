@@ -604,13 +604,20 @@ const createChatMessage = (role, text) => ({
 });
 
 const DEFAULT_CHAT_MESSAGES = [createChatMessage("assistant", "Hi! Ask about your diagram or usage.")];
+const THEME_STORAGE_KEY = "uml-theme";
 
 const App = () => {
+  const [theme, setTheme] = useState(() => localStorage.getItem(THEME_STORAGE_KEY) || "dark");
   const [auth, setAuth] = useState(loadAuthState);
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authMode, setAuthMode] = useState("login");
-  const [authForm, setAuthForm] = useState({ email: "", password: "" });
+  const [authForm, setAuthForm] = useState({ email: "", password: "", name: "" });
   const [authError, setAuthError] = useState("");
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileError, setProfileError] = useState("");
+  const [profileMessage, setProfileMessage] = useState("");
+  const [passwordForm, setPasswordForm] = useState({ current: "", next: "" });
+  const [topUpAmount, setTopUpAmount] = useState("");
   const [fileMenuOpen, setFileMenuOpen] = useState(false);
   const [generateMenuOpen, setGenerateMenuOpen] = useState(false);
   const [showSaveModal, setShowSaveModal] = useState(false);
@@ -646,12 +653,21 @@ const App = () => {
   const [generateError, setGenerateError] = useState("");
   const [generateLoading, setGenerateLoading] = useState(false);
   const [generateMode, setGenerateMode] = useState("");
+  const [generateTemplate, setGenerateTemplate] = useState("");
   const [generateFiles, setGenerateFiles] = useState([]);
   const [generateDownloadUrl, setGenerateDownloadUrl] = useState("");
+  const [templateOptions, setTemplateOptions] = useState({ odoo: [], sql: [] });
+  const [selectedOdooTemplate, setSelectedOdooTemplate] = useState("17");
+  const [selectedSqlTemplate, setSelectedSqlTemplate] = useState("postgresql");
 
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [selectedNodeId, setSelectedNodeId] = useState(null);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+  }, [theme]);
 
   const saveAuthState = (nextAuth) => {
     setAuth(nextAuth);
@@ -666,6 +682,7 @@ const App = () => {
     setAuthError("");
     const email = authForm.email.trim();
     const password = authForm.password.trim();
+    const name = authForm.name.trim();
     if (!email || !password) {
       setAuthError("Email and password required");
       return;
@@ -674,21 +691,121 @@ const App = () => {
     const mode = modeOverride || authMode;
     const endpoint = mode === "signup" ? "/api/auth/signup" : "/api/auth/login";
     try {
+      const payload = mode === "signup" ? { email, password, name } : { email, password };
       const res = await fetch(`${apiBase}${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password })
+        body: JSON.stringify(payload)
       });
       if (!res.ok) {
         const detail = await res.json().catch(() => ({}));
         throw new Error(detail.detail || `HTTP ${res.status}`);
       }
       const data = await res.json();
-      saveAuthState({ token: data.token, email: data.email });
+      saveAuthState({
+        token: data.token,
+        email: data.email,
+        name: data.name,
+        credits: data.credits ?? 0
+      });
       setAuthModalOpen(false);
-      setAuthForm({ email: "", password: "" });
+      setAuthForm({ email: "", password: "", name: "" });
     } catch (err) {
       setAuthError(err.message || "Authentication failed");
+    }
+  };
+
+  const refreshProfile = async () => {
+    if (!auth?.token) return;
+    const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+    try {
+      const res = await fetch(`${apiBase}/api/user/me`, {
+        headers: { Authorization: `Bearer ${auth.token}` }
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      saveAuthState({
+        token: auth.token,
+        email: data.email || auth.email,
+        name: data.name ?? auth.name,
+        credits: data.credits ?? auth.credits ?? 0
+      });
+    } catch (err) {
+      console.error("Failed to refresh profile", err);
+    }
+  };
+
+  const openProfile = () => {
+    setProfileError("");
+    setProfileMessage("");
+    setProfileOpen(true);
+    refreshProfile();
+  };
+
+  const handleChangePassword = async () => {
+    setProfileError("");
+    setProfileMessage("");
+    if (!passwordForm.current || !passwordForm.next) {
+      setProfileError("Please enter current and new password");
+      return;
+    }
+    const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+    try {
+      const res = await fetch(`${apiBase}/api/user/change-password`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${auth.token}`
+        },
+        body: JSON.stringify({
+          current_password: passwordForm.current,
+          new_password: passwordForm.next
+        })
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${res.status}`);
+      }
+      setProfileMessage("Password updated.");
+      setPasswordForm({ current: "", next: "" });
+    } catch (err) {
+      setProfileError(err.message || "Failed to update password");
+    }
+  };
+
+  const handleTopUp = async () => {
+    setProfileError("");
+    setProfileMessage("");
+    const amount = Number.parseInt(topUpAmount, 10);
+    if (!amount || amount <= 0) {
+      setProfileError("Enter a valid top up amount");
+      return;
+    }
+    const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+    try {
+      const res = await fetch(`${apiBase}/api/user/topup`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${auth.token}`
+        },
+        body: JSON.stringify({ amount })
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      saveAuthState({
+        token: auth.token,
+        email: data.email || auth.email,
+        name: data.name ?? auth.name,
+        credits: data.credits ?? auth.credits ?? 0
+      });
+      setProfileMessage("Credits updated.");
+      setTopUpAmount("");
+    } catch (err) {
+      setProfileError(err.message || "Failed to top up credits");
     }
   };
 
@@ -716,6 +833,29 @@ const App = () => {
     window.addEventListener("click", handleClick);
     return () => window.removeEventListener("click", handleClick);
   }, [exportMenuOpen]);
+
+  useEffect(() => {
+    if (!auth?.token) return;
+    const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+    fetch(`${apiBase}/api/templates`, {
+      headers: { Authorization: `Bearer ${auth.token}` }
+    })
+      .then((res) => (res.ok ? res.json() : Promise.reject(res)))
+      .then((data) => {
+        setTemplateOptions({
+          odoo: data.odoo || [],
+          sql: data.sql || []
+        });
+        if (data.odoo?.length) setSelectedOdooTemplate(data.odoo[0]);
+        if (data.sql?.length) setSelectedSqlTemplate(data.sql[0]);
+      })
+      .catch(() => {});
+  }, [auth?.token]);
+
+  useEffect(() => {
+    if (!auth?.token) return;
+    refreshProfile();
+  }, [auth?.token]);
 
   useEffect(() => {
     const handleMouseMove = (event) => {
@@ -971,6 +1111,8 @@ const App = () => {
     setGenerateFiles([]);
     setGenerateDownloadUrl("");
     setGenerateMode(mode);
+    const template = mode === "odoo" ? selectedOdooTemplate : selectedSqlTemplate;
+    setGenerateTemplate(template);
     const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
     try {
       const res = await fetch(`${apiBase}/api/generate`, {
@@ -981,6 +1123,7 @@ const App = () => {
         },
         body: JSON.stringify({
           type: mode,
+          template,
           diagram: { nodes, edges, chatMessages }
         })
       });
@@ -1007,7 +1150,8 @@ const App = () => {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `${diagramName || "diagram"}.sql`;
+    const suffix = generateTemplate || selectedSqlTemplate || "sql";
+    link.download = `${diagramName || "diagram"}-${suffix}.sql`;
     link.click();
     URL.revokeObjectURL(url);
   };
@@ -1024,7 +1168,8 @@ const App = () => {
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = "odoo_addon.zip";
+      const suffix = generateTemplate || selectedOdooTemplate || "odoo";
+      link.download = `${diagramName || "diagram"}-${suffix}.zip`;
       link.click();
       URL.revokeObjectURL(url);
     } catch (err) {
@@ -1130,8 +1275,22 @@ const App = () => {
     return (
       <div className="auth-gate">
         <div className="card auth-card">
-          <h1>UML Class Diagrammer</h1>
+          <div className="auth-header">
+            <h1>UML Class Diagrammer</h1>
+            <button
+              className="small-btn secondary"
+              onClick={() => setTheme((prev) => (prev === "dark" ? "light" : "dark"))}
+            >
+              {theme === "dark" ? "☀" : "🌙"}
+            </button>
+          </div>
           <div className="form-stack">
+            <input
+              type="text"
+              placeholder="Name (for sign up)"
+              value={authForm.name}
+              onChange={(e) => setAuthForm((prev) => ({ ...prev, name: e.target.value }))}
+            />
             <input
               type="email"
               placeholder="Email"
@@ -1261,24 +1420,54 @@ const App = () => {
           </button>
           {generateMenuOpen && (
             <div className="menu-panel" onClick={(event) => event.stopPropagation()}>
-              <button
-                className="menu-item"
-                onClick={() => {
-                  requestGenerate("db");
-                  setGenerateMenuOpen(false);
-                }}
-              >
-                Database Structure
-              </button>
-              <button
-                className="menu-item"
-                onClick={() => {
-                  requestGenerate("odoo");
-                  setGenerateMenuOpen(false);
-                }}
-              >
-                Odoo Addon
-              </button>
+              <div className="menu-item split">
+                <span>Database Structure</span>
+                <select
+                  value={selectedSqlTemplate}
+                  onChange={(event) => setSelectedSqlTemplate(event.target.value)}
+                >
+                  {(templateOptions.sql.length ? templateOptions.sql : [selectedSqlTemplate]).map(
+                    (tpl) => (
+                      <option key={tpl} value={tpl}>
+                        {tpl}
+                      </option>
+                    )
+                  )}
+                </select>
+                <button
+                  className="small-btn secondary"
+                  onClick={() => {
+                    requestGenerate("db");
+                    setGenerateMenuOpen(false);
+                  }}
+                >
+                  Generate
+                </button>
+              </div>
+              <div className="menu-item split">
+                <span>Odoo Addon</span>
+                <select
+                  value={selectedOdooTemplate}
+                  onChange={(event) => setSelectedOdooTemplate(event.target.value)}
+                >
+                  {(templateOptions.odoo.length ? templateOptions.odoo : [selectedOdooTemplate]).map(
+                    (tpl) => (
+                      <option key={tpl} value={tpl}>
+                        {tpl}
+                      </option>
+                    )
+                  )}
+                </select>
+                <button
+                  className="small-btn secondary"
+                  onClick={() => {
+                    requestGenerate("odoo");
+                    setGenerateMenuOpen(false);
+                  }}
+                >
+                  Generate
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -1319,9 +1508,17 @@ const App = () => {
           )}
         </div>
         <div className="toolbar-right">
+          <button
+            className="small-btn secondary"
+            onClick={() => setTheme((prev) => (prev === "dark" ? "light" : "dark"))}
+          >
+            {theme === "dark" ? "☀" : "🌙"}
+          </button>
           {auth?.email ? (
             <div className="auth-status">
-              <span className="muted">{auth.email}</span>
+              <button className="profile-button" onClick={openProfile}>
+                {auth.name || auth.email}
+              </button>
               <button
                 className="small-btn secondary"
                 onClick={() => {
@@ -1580,6 +1777,14 @@ const App = () => {
               </button>
             </div>
             <div className="form-stack">
+              {authMode === "signup" && (
+                <input
+                  type="text"
+                  placeholder="Name"
+                  value={authForm.name}
+                  onChange={(e) => setAuthForm((prev) => ({ ...prev, name: e.target.value }))}
+                />
+              )}
               <input
                 type="email"
                 placeholder="Email"
@@ -1606,6 +1811,69 @@ const App = () => {
                 {authMode === "signup" ? "Have an account? Login" : "New here? Sign up"}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+      {profileOpen && (
+        <div className="modal-backdrop" onClick={() => setProfileOpen(false)}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3>User Profile</h3>
+              <button className="small-btn secondary" onClick={() => setProfileOpen(false)}>
+                Close
+              </button>
+            </div>
+            <div className="profile-info">
+              <div>
+                <div className="muted">Name</div>
+                <div>{auth?.name || "—"}</div>
+              </div>
+              <div>
+                <div className="muted">Email</div>
+                <div>{auth?.email}</div>
+              </div>
+              <div>
+                <div className="muted">Credits</div>
+                <div>{auth?.credits ?? 0}</div>
+              </div>
+            </div>
+            <div className="section">
+              <h4>Change Password</h4>
+              <div className="form-stack">
+                <input
+                  type="password"
+                  placeholder="Current password"
+                  value={passwordForm.current}
+                  onChange={(e) => setPasswordForm((prev) => ({ ...prev, current: e.target.value }))}
+                />
+                <input
+                  type="password"
+                  placeholder="New password"
+                  value={passwordForm.next}
+                  onChange={(e) => setPasswordForm((prev) => ({ ...prev, next: e.target.value }))}
+                />
+                <button className="small-btn secondary" onClick={handleChangePassword}>
+                  Update Password
+                </button>
+              </div>
+            </div>
+            <div className="section">
+              <h4>Top Up Credits</h4>
+              <div className="form-stack">
+                <input
+                  type="number"
+                  min="1"
+                  placeholder="Amount"
+                  value={topUpAmount}
+                  onChange={(e) => setTopUpAmount(e.target.value)}
+                />
+                <button className="small-btn secondary" onClick={handleTopUp}>
+                  Top Up
+                </button>
+              </div>
+            </div>
+            {profileError && <div className="muted error-text">{profileError}</div>}
+            {profileMessage && <div className="muted">{profileMessage}</div>}
           </div>
         </div>
       )}

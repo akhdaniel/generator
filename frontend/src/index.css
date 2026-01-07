@@ -1,13 +1,45 @@
 :root {
   --bg: #0f172a;
+  --bg-grad-1: rgba(124, 58, 237, 0.12);
+  --bg-grad-2: rgba(34, 211, 238, 0.1);
   --panel: #111827;
   --card: #0b1324;
+  --surface: #0b1224;
+  --surface-2: #0d182c;
+  --input-bg: #0d182c;
+  --modal-bg: #0b1224;
+  --diagram-grad-1: rgba(124, 58, 237, 0.12);
+  --diagram-grad-2: rgba(34, 211, 238, 0.12);
+  --chat-grad-1: rgba(12, 18, 34, 0.95);
+  --chat-grad-2: rgba(11, 19, 36, 0.95);
   --border: #1f2937;
   --accent: #7c3aed;
   --accent-2: #22d3ee;
   --text: #e5e7eb;
   --muted: #9ca3af;
   --danger: #ef4444;
+}
+
+:root[data-theme="light"] {
+  --bg: #f5f7fb;
+  --bg-grad-1: rgba(16, 185, 129, 0.1);
+  --bg-grad-2: rgba(59, 130, 246, 0.12);
+  --panel: #ffffff;
+  --card: #f8fafc;
+  --surface: #ffffff;
+  --surface-2: #f1f5f9;
+  --input-bg: #f8fafc;
+  --modal-bg: #ffffff;
+  --diagram-grad-1: rgba(16, 185, 129, 0.08);
+  --diagram-grad-2: rgba(59, 130, 246, 0.08);
+  --chat-grad-1: rgba(248, 250, 252, 0.95);
+  --chat-grad-2: rgba(241, 245, 249, 0.95);
+  --border: #e2e8f0;
+  --accent: #0f766e;
+  --accent-2: #2563eb;
+  --text: #0f172a;
+  --muted: #6b7280;
+  --danger: #dc2626;
 }
 
 * {
@@ -17,8 +49,8 @@
 body {
   margin: 0;
   font-family: "Space Grotesk", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-  background: radial-gradient(circle at 20% 20%, rgba(124, 58, 237, 0.12), transparent 35%),
-    radial-gradient(circle at 80% 0%, rgba(34, 211, 238, 0.1), transparent 35%),
+  background: radial-gradient(circle at 20% 20%, var(--bg-grad-1), transparent 35%),
+    radial-gradient(circle at 80% 0%, var(--bg-grad-2), transparent 35%),
     var(--bg);
   color: var(--text);
   min-height: 100vh;
@@ -46,7 +78,7 @@ textarea {
   gap: 0.5rem;
   padding: 0.9rem 1rem;
   border-bottom: 1px solid var(--border);
-  background: rgba(17, 24, 39, 0.85);
+  background: var(--panel);
   backdrop-filter: blur(10px);
   position: sticky;
   top: 0;
@@ -101,7 +133,7 @@ textarea {
 
 .menu-trigger {
   border: 1px solid var(--border);
-  background: rgba(15, 23, 42, 0.6);
+  background: var(--surface-2);
   color: var(--text);
   border-radius: 10px;
   padding: 0.45rem 0.75rem;
@@ -113,7 +145,7 @@ textarea {
   top: calc(100% + 8px);
   left: 0;
   min-width: 160px;
-  background: #0b1224;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 12px;
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
@@ -132,6 +164,25 @@ textarea {
   cursor: pointer;
 }
 
+.menu-item.split {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: default;
+}
+
+.menu-item.split select {
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 0.25rem 0.4rem;
+}
+
+.menu-item.split:hover {
+  background: transparent;
+}
+
 .menu-item:hover {
   background: rgba(148, 163, 184, 0.2);
 }
@@ -142,7 +193,7 @@ textarea {
 
 .output-area {
   width: 100%;
-  background: #0d182c;
+  background: var(--input-bg);
   border: 1px solid var(--border);
   border-radius: 10px;
   color: var(--text);
@@ -179,7 +230,7 @@ textarea {
 .field input,
 .field select,
 .field textarea {
-  background: #0d182c;
+  background: var(--input-bg);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0.45rem 0.55rem;
@@ -230,9 +281,9 @@ textarea {
 .diagram-area {
   position: relative;
   flex: 0 0 auto;
-  background: radial-gradient(circle at 30% 10%, rgba(124, 58, 237, 0.12), transparent 30%),
-    radial-gradient(circle at 90% 50%, rgba(34, 211, 238, 0.12), transparent 32%),
-    #0b1224;
+  background: radial-gradient(circle at 30% 10%, var(--diagram-grad-1), transparent 30%),
+    radial-gradient(circle at 90% 50%, var(--diagram-grad-2), transparent 32%),
+    var(--surface);
   overflow: hidden;
   height: 100%;
 }
@@ -261,7 +312,7 @@ textarea {
 .chat-panel {
   flex: 0 0 auto;
   border-left: 1px solid var(--border);
-  background: linear-gradient(180deg, rgba(12, 18, 34, 0.95), rgba(11, 19, 36, 0.95));
+  background: linear-gradient(180deg, var(--chat-grad-1), var(--chat-grad-2));
   padding: 1rem;
   overflow: hidden;
 }
@@ -323,7 +374,7 @@ textarea {
 
 .chat-input-row textarea {
   width: 100%;
-  background: #0d182c;
+  background: var(--input-bg);
   border: 1px solid var(--border);
   border-radius: 10px;
   color: var(--text);
@@ -380,7 +431,7 @@ textarea {
 
 .uml-node {
   min-width: 180px;
-  background: #0f172a;
+  background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 12px;
   color: var(--text);
@@ -464,8 +515,8 @@ textarea {
 
 .edge-label {
   position: absolute;
-  background: rgba(15, 23, 42, 0.9);
-  color: #e5e7eb;
+  background: var(--surface-2);
+  color: var(--text);
   padding: 4px 8px;
   border-radius: 8px;
   font-size: 12px;
@@ -491,7 +542,7 @@ textarea {
 }
 
 .inline-input {
-  background: #0d182c;
+  background: var(--input-bg);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0.3rem 0.45rem;
@@ -529,7 +580,7 @@ textarea {
 }
 
 .modal {
-  background: #0b1224;
+  background: var(--modal-bg);
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 1rem;
@@ -553,7 +604,7 @@ textarea {
 
 .form-stack input {
   width: 100%;
-  background: #0d182c;
+  background: var(--input-bg);
   border: 1px solid var(--border);
   border-radius: 10px;
   color: var(--text);
@@ -570,6 +621,19 @@ textarea {
   gap: 0.5rem;
 }
 
+.profile-button {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
+
+.profile-button:hover {
+  color: var(--accent);
+}
+
 .auth-gate {
   min-height: 100vh;
   display: flex;
@@ -584,6 +648,13 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+}
+
+.auth-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  align-items: center;
 }
 
 .auth-actions {
@@ -612,5 +683,18 @@ textarea {
   padding: 0.5rem 0.75rem;
   border: 1px solid var(--border);
   border-radius: 10px;
-  background: rgba(15, 23, 42, 0.4);
+  background: var(--surface-2);
+}
+
+.profile-info {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.75rem;
+  padding: 0.25rem 0 0.5rem;
+}
+
+.section {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
 }
