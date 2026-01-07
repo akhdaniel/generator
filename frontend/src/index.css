@@ -88,8 +88,8 @@ textarea {
 }
 
 .layout {
-  display: grid;
-  grid-template-columns: 1fr 340px;
+  display: flex;
+  align-items: stretch;
   height: calc(100vh - 72px);
   max-height: calc(100vh - 72px);
 }
@@ -159,6 +159,7 @@ textarea {
 
 .diagram-area {
   position: relative;
+  flex: 0 0 auto;
   background: radial-gradient(circle at 30% 10%, rgba(124, 58, 237, 0.12), transparent 30%),
     radial-gradient(circle at 90% 50%, rgba(34, 211, 238, 0.12), transparent 32%),
     #0b1224;
@@ -166,7 +167,29 @@ textarea {
   height: 100%;
 }
 
+.pane-resizer {
+  width: 10px;
+  cursor: col-resize;
+  background: rgba(148, 163, 184, 0.15);
+  position: relative;
+}
+
+.pane-resizer::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 2px;
+  background: rgba(148, 163, 184, 0.45);
+}
+
+.pane-resizer:hover::before {
+  background: rgba(148, 163, 184, 0.35);
+}
+
 .chat-panel {
+  flex: 0 0 auto;
   border-left: 1px solid var(--border);
   background: linear-gradient(180deg, rgba(12, 18, 34, 0.95), rgba(11, 19, 36, 0.95));
   padding: 1rem;
@@ -440,6 +463,53 @@ textarea {
   justify-content: space-between;
   gap: 1rem;
   margin-bottom: 0.5rem;
+}
+
+.form-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.form-stack input {
+  width: 100%;
+  background: #0d182c;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 0.5rem 0.7rem;
+}
+
+.error-text {
+  color: #f87171;
+}
+
+.auth-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.auth-gate {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+}
+
+.auth-card {
+  max-width: 420px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.auth-actions {
+  display: flex;
+  justify-content: center;
+  gap: 0.75rem;
 }
 
 .list {

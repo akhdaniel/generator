@@ -1,13 +1,15 @@
 import os
 import json
 import logging
+import secrets
 import sqlite3
+import hashlib
 from datetime import datetime
 from typing import Optional
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -110,6 +112,16 @@ class DiagramPayload(BaseModel):
     chatMessages: Optional[list] = None
 
 
+class AuthRequest(BaseModel):
+    email: str
+    password: str
+
+
+class AuthResponse(BaseModel):
+    token: str
+    email: str
+
+
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -121,13 +133,65 @@ def init_db():
     try:
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS diagrams (
-                name TEXT PRIMARY KEY,
-                data TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                password_salt TEXT NOT NULL,
+                created_at TEXT NOT NULL
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS diagrams (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id INTEGER,
+                name TEXT NOT NULL,
+                data TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (owner_id) REFERENCES users(id),
+                UNIQUE (owner_id, name)
+            )
+            """
+        )
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(diagrams)").fetchall()
+        }
+        if "id" not in columns:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS diagrams_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_id INTEGER,
+                    name TEXT NOT NULL,
+                    data TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (owner_id) REFERENCES users(id),
+                    UNIQUE (owner_id, name)
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO diagrams_new (owner_id, name, data, updated_at)
+                SELECT owner_id, name, data, updated_at FROM diagrams
+                """
+            )
+            conn.execute("DROP TABLE diagrams")
+            conn.execute("ALTER TABLE diagrams_new RENAME TO diagrams")
+        elif "owner_id" not in columns:
+            conn.execute("ALTER TABLE diagrams ADD COLUMN owner_id INTEGER")
         conn.commit()
     finally:
         conn.close()
@@ -141,6 +205,89 @@ def on_startup():
 @app.get("/healthz")
 async def healthcheck():
     return {"status": "ok"}
+
+
+def hash_password(password: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 120_000).hex()
+
+
+def create_session(conn: sqlite3.Connection, user_id: int) -> str:
+    token = secrets.token_urlsafe(32)
+    conn.execute(
+        "INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)",
+        (token, user_id, datetime.utcnow().isoformat() + "Z"),
+    )
+    return token
+
+
+async def get_current_user(authorization: Optional[str] = Header(None)):
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing authorization")
+    token = authorization.split(" ", 1)[1].strip()
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT users.id, users.email
+            FROM sessions
+            JOIN users ON users.id = sessions.user_id
+            WHERE sessions.token = ?
+            """,
+            (token,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return {"id": row["id"], "email": row["email"]}
+    finally:
+        conn.close()
+
+
+@app.post("/api/auth/signup", response_model=AuthResponse)
+async def signup(req: AuthRequest):
+    email = req.email.strip().lower()
+    if not email or not req.password:
+        raise HTTPException(status_code=400, detail="Email and password required")
+    salt = secrets.token_hex(16)
+    pwd_hash = hash_password(req.password, salt)
+    conn = get_db_connection()
+    try:
+        try:
+            conn.execute(
+                "INSERT INTO users (email, password_hash, password_salt, created_at) VALUES (?, ?, ?, ?)",
+                (email, pwd_hash, salt, datetime.utcnow().isoformat() + "Z"),
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=409, detail="Email already exists")
+        user_id = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()["id"]
+        token = create_session(conn, user_id)
+        conn.commit()
+        return AuthResponse(token=token, email=email)
+    finally:
+        conn.close()
+
+
+@app.post("/api/auth/login", response_model=AuthResponse)
+async def login(req: AuthRequest):
+    email = req.email.strip().lower()
+    if not email or not req.password:
+        raise HTTPException(status_code=400, detail="Email and password required")
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            "SELECT id, password_hash, password_salt FROM users WHERE email = ?",
+            (email,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        expected = row["password_hash"]
+        actual = hash_password(req.password, row["password_salt"])
+        if actual != expected:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        token = create_session(conn, row["id"])
+        conn.commit()
+        return AuthResponse(token=token, email=email)
+    finally:
+        conn.close()
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -211,11 +358,12 @@ async def chat(req: ChatRequest):
 
 
 @app.get("/api/diagrams")
-async def list_diagrams():
+async def list_diagrams(user=Depends(get_current_user)):
     conn = get_db_connection()
     try:
         rows = conn.execute(
-            "SELECT name, data FROM diagrams ORDER BY updated_at DESC"
+            "SELECT name, data FROM diagrams WHERE owner_id = ? ORDER BY updated_at DESC",
+            (user["id"],),
         ).fetchall()
         diagrams = {}
         for row in rows:
@@ -229,12 +377,12 @@ async def list_diagrams():
 
 
 @app.get("/api/diagrams/{name}")
-async def get_diagram(name: str):
+async def get_diagram(name: str, user=Depends(get_current_user)):
     conn = get_db_connection()
     try:
         row = conn.execute(
-            "SELECT name, data, updated_at FROM diagrams WHERE name = ?",
-            (name,),
+            "SELECT name, data, updated_at FROM diagrams WHERE name = ? AND owner_id = ?",
+            (name, user["id"]),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Diagram not found")
@@ -248,14 +396,19 @@ async def get_diagram(name: str):
 
 
 @app.post("/api/diagrams/{name}")
-async def save_diagram(name: str, payload: DiagramPayload):
+async def save_diagram(name: str, payload: DiagramPayload, user=Depends(get_current_user)):
     conn = get_db_connection()
     try:
         data_json = json.dumps(payload.dict())
         updated_at = datetime.utcnow().isoformat() + "Z"
         conn.execute(
-            "INSERT OR REPLACE INTO diagrams (name, data, updated_at) VALUES (?, ?, ?)",
-            (name, data_json, updated_at),
+            """
+            INSERT INTO diagrams (owner_id, name, data, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(owner_id, name)
+            DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
+            """,
+            (user["id"], name, data_json, updated_at),
         )
         conn.commit()
         return {"status": "ok", "name": name, "updated_at": updated_at}
@@ -264,10 +417,13 @@ async def save_diagram(name: str, payload: DiagramPayload):
 
 
 @app.delete("/api/diagrams/{name}")
-async def delete_diagram(name: str):
+async def delete_diagram(name: str, user=Depends(get_current_user)):
     conn = get_db_connection()
     try:
-        cur = conn.execute("DELETE FROM diagrams WHERE name = ?", (name,))
+        cur = conn.execute(
+            "DELETE FROM diagrams WHERE name = ? AND owner_id = ?",
+            (name, user["id"]),
+        )
         conn.commit()
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="Diagram not found")

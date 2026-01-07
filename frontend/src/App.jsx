@@ -34,13 +34,27 @@ const MULTIPLICITY_PRESETS = [
   { value: "many2many", label: "many to many (*)", text: "*" }
 ];
 
-const useRemoteDiagrams = () => {
+const AUTH_STORAGE_KEY = "uml-auth";
+
+const loadAuthState = () => {
+  try {
+    const raw = localStorage.getItem(AUTH_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    console.error("Failed to read auth state", err);
+    return null;
+  }
+};
+
+const useRemoteDiagrams = (token) => {
   const [all, setAll] = useState({});
   const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
   const refreshDiagrams = async () => {
     try {
-      const res = await fetch(`${apiBase}/api/diagrams`);
+      const res = await fetch(`${apiBase}/api/diagrams`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setAll(data.diagrams || {});
@@ -50,14 +64,15 @@ const useRemoteDiagrams = () => {
   };
 
   useEffect(() => {
-    refreshDiagrams();
-  }, [apiBase]);
+    if (token) refreshDiagrams();
+  }, [apiBase, token]);
 
   const saveDiagram = async (name, data) => {
     try {
+      if (!token) throw new Error("Not authenticated");
       const res = await fetch(`${apiBase}/api/diagrams/${encodeURIComponent(name)}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify(data)
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -69,8 +84,10 @@ const useRemoteDiagrams = () => {
 
   const removeDiagram = async (name) => {
     try {
+      if (!token) throw new Error("Not authenticated");
       const res = await fetch(`${apiBase}/api/diagrams/${encodeURIComponent(name)}`, {
-        method: "DELETE"
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` }
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setAll((prev) => {
@@ -588,7 +605,12 @@ const createChatMessage = (role, text) => ({
 const DEFAULT_CHAT_MESSAGES = [createChatMessage("assistant", "Hi! Ask about your diagram or usage.")];
 
 const App = () => {
-  const { diagrams, saveDiagram, removeDiagram, refreshDiagrams } = useRemoteDiagrams();
+  const [auth, setAuth] = useState(loadAuthState);
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [authMode, setAuthMode] = useState("login");
+  const [authForm, setAuthForm] = useState({ email: "", password: "" });
+  const [authError, setAuthError] = useState("");
+  const { diagrams, saveDiagram, removeDiagram, refreshDiagrams } = useRemoteDiagrams(auth?.token);
   const [diagramName, setDiagramName] = useState("My Diagram");
   const [showOpenModal, setShowOpenModal] = useState(false);
   const [relationForm, setRelationForm] = useState({
@@ -608,14 +630,77 @@ const App = () => {
   const [chatLoading, setChatLoading] = useState(false);
   const [conversationId, setConversationId] = useState(null);
   const chatEndRef = useRef(null);
+  const layoutRef = useRef(null);
+  const [diagramWidth, setDiagramWidth] = useState(70);
+  const isResizingRef = useRef(false);
 
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [selectedNodeId, setSelectedNodeId] = useState(null);
 
+  const saveAuthState = (nextAuth) => {
+    setAuth(nextAuth);
+    if (!nextAuth) {
+      localStorage.removeItem(AUTH_STORAGE_KEY);
+    } else {
+      localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(nextAuth));
+    }
+  };
+
+  const handleAuthSubmit = async () => {
+    setAuthError("");
+    const email = authForm.email.trim();
+    const password = authForm.password.trim();
+    if (!email || !password) {
+      setAuthError("Email and password required");
+      return;
+    }
+    const apiBase = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+    const endpoint = authMode === "signup" ? "/api/auth/signup" : "/api/auth/login";
+    try {
+      const res = await fetch(`${apiBase}${endpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password })
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      saveAuthState({ token: data.token, email: data.email });
+      setAuthModalOpen(false);
+      setAuthForm({ email: "", password: "" });
+    } catch (err) {
+      setAuthError(err.message || "Authentication failed");
+    }
+  };
+
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [chatMessages]);
+
+  useEffect(() => {
+    const handleMouseMove = (event) => {
+      if (!isResizingRef.current || !layoutRef.current) return;
+      const rect = layoutRef.current.getBoundingClientRect();
+      const offsetX = event.clientX - rect.left;
+      const nextPercent = (offsetX / rect.width) * 100;
+      const clamped = Math.min(85, Math.max(40, nextPercent));
+      setDiagramWidth(clamped);
+    };
+
+    const handleMouseUp = () => {
+      isResizingRef.current = false;
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, []);
 
   const selectedNode = useMemo(
     () => nodes.find((n) => n.id === selectedNodeId) || null,
@@ -704,6 +789,12 @@ const App = () => {
   };
 
   const saveCurrent = () => {
+    if (!auth?.token) {
+      setAuthMode("login");
+      setAuthError("Please log in to save diagrams");
+      setAuthModalOpen(true);
+      return;
+    }
     const payload = {
       nodes,
       edges,
@@ -868,6 +959,78 @@ const App = () => {
     }
   };
 
+  if (!auth?.token) {
+    return (
+      <div className="auth-gate">
+        <div className="card auth-card">
+          <h1>UML Class Diagrammer</h1>
+          <p className="muted">Log in to access your diagrams.</p>
+          <div className="auth-actions">
+            <button
+              className="small-btn secondary"
+              onClick={() => {
+                setAuthMode("login");
+                setAuthError("");
+                setAuthModalOpen(true);
+              }}
+            >
+              Login
+            </button>
+            <button
+              className="small-btn"
+              onClick={() => {
+                setAuthMode("signup");
+                setAuthError("");
+                setAuthModalOpen(true);
+              }}
+            >
+              Sign Up
+            </button>
+          </div>
+        </div>
+        {authModalOpen && (
+          <div className="modal-backdrop" onClick={() => setAuthModalOpen(false)}>
+            <div className="modal" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <h3>{authMode === "signup" ? "Create Account" : "Login"}</h3>
+                <button className="small-btn secondary" onClick={() => setAuthModalOpen(false)}>
+                  Close
+                </button>
+              </div>
+              <div className="form-stack">
+                <input
+                  type="email"
+                  placeholder="Email"
+                  value={authForm.email}
+                  onChange={(e) => setAuthForm((prev) => ({ ...prev, email: e.target.value }))}
+                />
+                <input
+                  type="password"
+                  placeholder="Password"
+                  value={authForm.password}
+                  onChange={(e) => setAuthForm((prev) => ({ ...prev, password: e.target.value }))}
+                />
+                {authError && <div className="muted error-text">{authError}</div>}
+                <button className="small-btn" onClick={handleAuthSubmit}>
+                  {authMode === "signup" ? "Sign Up" : "Login"}
+                </button>
+                <button
+                  className="small-btn secondary"
+                  onClick={() => {
+                    setAuthMode(authMode === "signup" ? "login" : "signup");
+                    setAuthError("");
+                  }}
+                >
+                  {authMode === "signup" ? "Have an account? Login" : "New here? Sign up"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div>
       <div className="toolbar">
@@ -885,14 +1048,63 @@ const App = () => {
         <button onClick={() => setNodes((prev) => rearrangeNodes(prev))}>Rearange</button>
         <button
           onClick={() => {
+            if (!auth?.token) {
+              setAuthMode("login");
+              setAuthError("Please log in to open diagrams");
+              setAuthModalOpen(true);
+              return;
+            }
             refreshDiagrams();
             setShowOpenModal(true);
           }}
         >
           Open...
         </button>
+        {auth?.email ? (
+          <div className="auth-status">
+            <span className="muted">{auth.email}</span>
+            <button
+              className="small-btn secondary"
+              onClick={() => {
+                saveAuthState(null);
+                clearAll();
+              }}
+            >
+              Logout
+            </button>
+          </div>
+        ) : (
+          <div className="auth-status">
+            <button
+              className="small-btn secondary"
+              onClick={() => {
+                setAuthMode("login");
+                setAuthError("");
+                setAuthModalOpen(true);
+              }}
+            >
+              Login
+            </button>
+            <button
+              className="small-btn"
+              onClick={() => {
+                setAuthMode("signup");
+                setAuthError("");
+                setAuthModalOpen(true);
+              }}
+            >
+              Sign Up
+            </button>
+          </div>
+        )}
         <button
           onClick={() => {
+            if (!auth?.token) {
+              setAuthMode("login");
+              setAuthError("Please log in to delete diagrams");
+              setAuthModalOpen(true);
+              return;
+            }
             if (diagramName && diagrams[diagramName]) {
               removeDiagram(diagramName);
               clearAll();
@@ -903,8 +1115,8 @@ const App = () => {
           Delete Saved
         </button>
       </div>
-      <div className="layout">
-        <div className="diagram-area">
+      <div className="layout" ref={layoutRef}>
+        <div className="diagram-area" style={{ width: `${diagramWidth}%` }}>
           <EditorContext.Provider
             value={{
               editingNodeId,
@@ -979,7 +1191,15 @@ const App = () => {
             </ReactFlow>
           </EditorContext.Provider>
         </div>
-        <div className="chat-panel">
+        <div
+          className="pane-resizer"
+          onMouseDown={() => {
+            isResizingRef.current = true;
+          }}
+          role="separator"
+          aria-label="Resize panels"
+        />
+        <div className="chat-panel" style={{ width: `${100 - diagramWidth}%` }}>
           <div className="card chat-card">
             <h2>Assistant</h2>
             <div className="chat-messages">
@@ -1037,6 +1257,45 @@ const App = () => {
                 ))}
               </div>
             )}
+          </div>
+        </div>
+      )}
+      {authModalOpen && (
+        <div className="modal-backdrop" onClick={() => setAuthModalOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>{authMode === "signup" ? "Create Account" : "Login"}</h3>
+              <button className="small-btn secondary" onClick={() => setAuthModalOpen(false)}>
+                Close
+              </button>
+            </div>
+            <div className="form-stack">
+              <input
+                type="email"
+                placeholder="Email"
+                value={authForm.email}
+                onChange={(e) => setAuthForm((prev) => ({ ...prev, email: e.target.value }))}
+              />
+              <input
+                type="password"
+                placeholder="Password"
+                value={authForm.password}
+                onChange={(e) => setAuthForm((prev) => ({ ...prev, password: e.target.value }))}
+              />
+              {authError && <div className="muted error-text">{authError}</div>}
+              <button className="small-btn" onClick={handleAuthSubmit}>
+                {authMode === "signup" ? "Sign Up" : "Login"}
+              </button>
+              <button
+                className="small-btn secondary"
+                onClick={() => {
+                  setAuthMode(authMode === "signup" ? "login" : "signup");
+                  setAuthError("");
+                }}
+              >
+                {authMode === "signup" ? "Have an account? Login" : "New here? Sign up"}
+              </button>
+            </div>
           </div>
         </div>
       )}
