@@ -37,6 +37,52 @@ const MULTIPLICITY_PRESETS = [
 
 const AUTH_STORAGE_KEY = "uml-auth";
 
+const createId = () =>
+  (typeof crypto !== "undefined" && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : `id-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+
+const normalizePropertyList = (list) => {
+  if (!list) return [];
+  if (Array.isArray(list)) {
+    return list
+      .map((item) => {
+        if (!item || typeof item !== "object") return null;
+        const key = typeof item.key === "string" ? item.key : String(item.key || "");
+        const value = typeof item.value === "string" ? item.value : String(item.value || "");
+        return { key, value };
+      })
+      .filter(Boolean);
+  }
+  if (typeof list === "object") {
+    return Object.entries(list).map(([key, value]) => ({
+      key: String(key),
+      value: value == null ? "" : String(value)
+    }));
+  }
+  return [];
+};
+
+const normalizeMemberList = (list) => {
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((item) => {
+      if (typeof item === "string") {
+        return { id: createId(), name: item, properties: [] };
+      }
+      if (item && typeof item === "object") {
+        return {
+          ...item,
+          id: item.id || createId(),
+          name: item.name || "",
+          properties: normalizePropertyList(item.properties)
+        };
+      }
+      return null;
+    })
+    .filter(Boolean);
+};
+
 const loadAuthState = () => {
   try {
     const raw = localStorage.getItem(AUTH_STORAGE_KEY);
@@ -144,7 +190,13 @@ const UmlNode = ({ id, data, selected }) => {
             <span>{name || "Class"}</span>
           )}
           {isEditing && (
-            <button className="small-btn secondary" onClick={() => editor?.setEditingNodeId(null)}>
+            <button
+              className="small-btn secondary"
+              onClick={() => {
+                editor?.setEditingNodeId(null);
+                editor?.setPropertyPaneOpen?.(false);
+              }}
+            >
               Done
             </button>
           )}
@@ -154,8 +206,23 @@ const UmlNode = ({ id, data, selected }) => {
           <ul>
             {attributes.length === 0 && <li className="muted">No attributes</li>}
             {attributes.map((attr, idx) => (
-              <li key={idx}>
-                {attr}
+              <li
+                key={idx}
+                onClick={() => {
+                  if (!isEditing) return;
+                  const memberId = typeof attr === "string" ? "" : attr.id;
+                  if (memberId) {
+                    editor?.openPropertiesForMember?.(id, memberId, "attribute");
+                  }
+                }}
+                onDoubleClick={() => {
+                  const memberId = typeof attr === "string" ? "" : attr.id;
+                  if (memberId) {
+                    editor?.openPropertiesForMember?.(id, memberId, "attribute");
+                  }
+                }}
+              >
+                {typeof attr === "string" ? attr : attr.name}
                 {isEditing && (
                   <button
                     className="small-btn secondary tiny"
@@ -193,8 +260,23 @@ const UmlNode = ({ id, data, selected }) => {
           <ul>
             {methods.length === 0 && <li className="muted">No methods</li>}
             {methods.map((m, idx) => (
-              <li key={idx}>
-                {m}
+              <li
+                key={idx}
+                onClick={() => {
+                  if (!isEditing) return;
+                  const memberId = typeof m === "string" ? "" : m.id;
+                  if (memberId) {
+                    editor?.openPropertiesForMember?.(id, memberId, "method");
+                  }
+                }}
+                onDoubleClick={() => {
+                  const memberId = typeof m === "string" ? "" : m.id;
+                  if (memberId) {
+                    editor?.openPropertiesForMember?.(id, memberId, "method");
+                  }
+                }}
+              >
+                {typeof m === "string" ? m : m.name}
                 {isEditing && (
                   <button
                     className="small-btn secondary tiny"
@@ -613,6 +695,12 @@ const App = () => {
   const [authMode, setAuthMode] = useState("login");
   const [authForm, setAuthForm] = useState({ email: "", password: "", name: "" });
   const [authError, setAuthError] = useState("");
+  const [diagramProperties, setDiagramProperties] = useState([]);
+  const [propertyPaneOpen, setPropertyPaneOpen] = useState(false);
+  const [propertyScope, setPropertyScope] = useState("diagram");
+  const [propertyNodeId, setPropertyNodeId] = useState("");
+  const [propertyMemberId, setPropertyMemberId] = useState("");
+  const [propertyEdgeId, setPropertyEdgeId] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileError, setProfileError] = useState("");
   const [profileMessage, setProfileMessage] = useState("");
@@ -858,6 +946,48 @@ const App = () => {
   }, [auth?.token]);
 
   useEffect(() => {
+    if (!nodes.length) {
+      setPropertyNodeId("");
+      setPropertyMemberId("");
+      return;
+    }
+    if (!propertyNodeId || !nodes.find((n) => n.id === propertyNodeId)) {
+      setPropertyNodeId(selectedNodeId || nodes[0].id);
+    }
+  }, [nodes, propertyNodeId, selectedNodeId]);
+
+  useEffect(() => {
+    if (!propertyNodeId) {
+      setPropertyMemberId("");
+      return;
+    }
+    if (propertyScope !== "attribute" && propertyScope !== "method") {
+      setPropertyMemberId("");
+      return;
+    }
+    const node = nodes.find((n) => n.id === propertyNodeId);
+    const list = propertyScope === "attribute" ? node?.data?.attributes : node?.data?.methods;
+    const normalized = normalizeMemberList(list || []);
+    if (!normalized.length) {
+      setPropertyMemberId("");
+      return;
+    }
+    if (!propertyMemberId || !normalized.find((m) => m.id === propertyMemberId)) {
+      setPropertyMemberId(normalized[0].id);
+    }
+  }, [nodes, propertyScope, propertyNodeId, propertyMemberId]);
+
+  useEffect(() => {
+    if (propertyScope !== "edge") {
+      setPropertyEdgeId("");
+      return;
+    }
+    if (!propertyEdgeId || !edges.find((e) => e.id === propertyEdgeId)) {
+      setPropertyEdgeId(edges[0]?.id || "");
+    }
+  }, [edges, propertyScope, propertyEdgeId]);
+
+  useEffect(() => {
     const handleMouseMove = (event) => {
       if (!isResizingRef.current || !layoutRef.current) return;
       const rect = layoutRef.current.getBoundingClientRect();
@@ -891,7 +1021,7 @@ const App = () => {
       id,
       type: "uml",
       position: { x: 100 + nodes.length * 40, y: 100 + nodes.length * 30 },
-      data: { name, attributes: [], methods: [] }
+      data: { name, attributes: [], methods: [], properties: [] }
     };
     setNodes((prev) => [...prev, newNode]);
     setSelectedNodeId(id);
@@ -954,7 +1084,8 @@ const App = () => {
             targetMultiplicity: resolvedTargetMultiplicity,
             sourceRole: resolvedSourceRole,
             targetRole: resolvedTargetRole,
-            relationType: type
+            relationType: type,
+            properties: []
           },
           markerStart,
           markerEnd,
@@ -976,7 +1107,8 @@ const App = () => {
     const payload = {
       nodes,
       edges,
-      chatMessages
+      chatMessages,
+      properties: diagramProperties
     };
     saveDiagram(resolvedName, payload);
     setDiagramName(resolvedName);
@@ -985,12 +1117,18 @@ const App = () => {
   const loadDiagram = (name) => {
     const data = diagrams[name];
     if (!data) return;
-    setNodes(data.nodes || []);
-    setEdges(data.edges || []);
+    const normalized = normalizeDiagramPayload({
+      nodes: data.nodes || [],
+      edges: data.edges || [],
+      properties: data.properties || []
+    });
+    setNodes(normalized.nodes || []);
+    setEdges(normalized.edges || []);
     setSelectedNodeId(null);
     setEditingNodeId(null);
     setDiagramName(name);
     setChatMessages(data.chatMessages || DEFAULT_CHAT_MESSAGES);
+    setDiagramProperties(normalized.properties || []);
   };
 
   const clearAll = () => {
@@ -998,16 +1136,21 @@ const App = () => {
     setEdges([]);
     setSelectedNodeId(null);
     setChatMessages(DEFAULT_CHAT_MESSAGES);
+    setDiagramProperties([]);
   };
 
   const addAttributeToNode = (id, val) => {
     if (!val.trim()) return;
-    updateNodeData(id, (d) => ({ attributes: [...d.attributes, val.trim()] }));
+    updateNodeData(id, (d) => ({
+      attributes: [...normalizeMemberList(d.attributes || []), { id: createId(), name: val.trim(), properties: [] }]
+    }));
   };
 
   const addMethodToNode = (id, val) => {
     if (!val.trim()) return;
-    updateNodeData(id, (d) => ({ methods: [...d.methods, val.trim()] }));
+    updateNodeData(id, (d) => ({
+      methods: [...normalizeMemberList(d.methods || []), { id: createId(), name: val.trim(), properties: [] }]
+    }));
   };
 
   const removeAttributeFromNode = (id, idx) => {
@@ -1124,7 +1267,7 @@ const App = () => {
         body: JSON.stringify({
           type: mode,
           template,
-          diagram: { nodes, edges, chatMessages }
+          diagram: { nodes, edges, chatMessages, properties: diagramProperties }
         })
       });
       if (!res.ok) {
@@ -1189,15 +1332,21 @@ const App = () => {
     }
   };
 
-  const buildChatMessage = (text) => {
-    const trimmed = text.trim();
-    if (!trimmed) return trimmed;
-    const diagramContext = JSON.stringify({ nodes, edges });
-    return `${trimmed}\n\nCURRENT_DIAGRAM_JSON:\n${diagramContext}`;
-  };
+  const normalizeDiagramPayload = (diagram) => {
+    const normalizedNodes = (diagram.nodes || []).map((node) => {
+      const data = node.data || {};
+      return {
+        ...node,
+        data: {
+          ...data,
+          properties: normalizePropertyList(data.properties),
+          attributes: normalizeMemberList(data.attributes || []),
+          methods: normalizeMemberList(data.methods || [])
+        }
+      };
+    });
 
-  const normalizeDiagramEdges = (diagram) => {
-    const nodeNameById = new Map((diagram.nodes || []).map((node) => [node.id, node.data?.name || ""]));
+    const nodeNameById = new Map(normalizedNodes.map((node) => [node.id, node.data?.name || ""]));
     const buildRoleDefaults = (sourceId, targetId) => {
       const sourceName = nodeNameById.get(sourceId) || "source";
       const targetName = nodeNameById.get(targetId) || "target";
@@ -1219,12 +1368,132 @@ const App = () => {
           targetMultiplicity: data.targetMultiplicity || "one2many",
           sourceRole: (data.sourceRole || "").trim() || defaults.sourceRole,
           targetRole: (data.targetRole || "").trim() || defaults.targetRole,
-          label: (data.label || "").trim()
+          label: (data.label || "").trim(),
+          properties: normalizePropertyList(data.properties)
         }
       };
     });
 
-    return { ...diagram, edges: normalizedEdges };
+    return {
+      ...diagram,
+      nodes: normalizedNodes,
+      edges: normalizedEdges,
+      properties: normalizePropertyList(diagram.properties)
+    };
+  };
+
+  const getPropertyTarget = () => {
+    if (propertyScope === "diagram") {
+      return { properties: diagramProperties, label: "Diagram" };
+    }
+    if (propertyScope === "edge") {
+      const edge = edges.find((e) => e.id === propertyEdgeId);
+      return {
+        properties: normalizePropertyList(edge?.data?.properties),
+        label: edge?.data?.label || "Line"
+      };
+    }
+    const node = nodes.find((n) => n.id === propertyNodeId);
+    if (!node) return { properties: [], label: "Class" };
+    if (propertyScope === "class") {
+      return { properties: normalizePropertyList(node.data?.properties), label: node.data?.name || "Class" };
+    }
+    const list = propertyScope === "attribute" ? node.data?.attributes : node.data?.methods;
+    const normalized = normalizeMemberList(list || []);
+    const member = normalized.find((item) => item.id === propertyMemberId);
+    return { properties: normalizePropertyList(member?.properties), label: member?.name || "Member" };
+  };
+
+  const updatePropertyList = (updater) => {
+    if (propertyScope === "diagram") {
+      setDiagramProperties((prev) => normalizePropertyList(updater(normalizePropertyList(prev))));
+      return;
+    }
+    if (propertyScope === "edge") {
+      if (!propertyEdgeId) return;
+      setEdges((prev) =>
+        prev.map((edge) =>
+          edge.id === propertyEdgeId
+            ? {
+                ...edge,
+                data: {
+                  ...edge.data,
+                  properties: normalizePropertyList(
+                    updater(normalizePropertyList(edge.data?.properties))
+                  )
+                }
+              }
+            : edge
+        )
+      );
+      return;
+    }
+    if (!propertyNodeId) return;
+    if (propertyScope === "class") {
+      setNodes((prev) =>
+        prev.map((node) =>
+          node.id === propertyNodeId
+            ? {
+                ...node,
+                data: {
+                  ...node.data,
+                  properties: normalizePropertyList(
+                    updater(normalizePropertyList(node.data?.properties))
+                  )
+                }
+              }
+            : node
+        )
+      );
+      return;
+    }
+    if (!propertyMemberId) return;
+    setNodes((prev) =>
+      prev.map((node) => {
+        if (node.id !== propertyNodeId) return node;
+        const key = propertyScope === "attribute" ? "attributes" : "methods";
+        const list = normalizeMemberList(node.data?.[key] || []);
+        const nextList = list.map((item) => {
+          if (item.id !== propertyMemberId) return item;
+          return {
+            ...item,
+            properties: normalizePropertyList(updater(normalizePropertyList(item.properties)))
+          };
+        });
+        return { ...node, data: { ...node.data, [key]: nextList } };
+      })
+    );
+  };
+
+  const openPropertiesForDiagram = () => {
+    setPropertyScope("diagram");
+    setPropertyPaneOpen(true);
+  };
+
+  const openPropertiesForClass = (nodeId) => {
+    setPropertyScope("class");
+    setPropertyNodeId(nodeId);
+    setPropertyPaneOpen(true);
+  };
+
+  const openPropertiesForMember = (nodeId, memberId, kind) => {
+    setPropertyScope(kind);
+    setPropertyNodeId(nodeId);
+    setPropertyMemberId(memberId);
+    setPropertyPaneOpen(true);
+  };
+
+  const openPropertiesForEdge = (edgeId) => {
+    setPropertyScope("edge");
+    setPropertyEdgeId(edgeId);
+    setPropertyPaneOpen(true);
+  };
+
+  const buildChatMessage = (text) => {
+    const trimmed = text.trim();
+    if (!trimmed) return trimmed;
+    const diagramContext = JSON.stringify({ nodes, edges, properties: diagramProperties });
+    return `${trimmed}\n\nCURRENT_DIAGRAM_JSON:\n${diagramContext}`;
   };
 
   const sendChat = async () => {
@@ -1254,9 +1523,13 @@ const App = () => {
         assistantText = isNewDiagram
           ? "Diagram Created"
           : `Diagram Updated: ${userRequest || "Applied changes"}`;
-        const normalized = normalizeDiagramEdges(diagram);
+        const normalized = normalizeDiagramPayload(diagram);
         setNodes(rearrangeNodes(normalized.nodes));
         setEdges(normalized.edges);
+        const nextProperties = Object.prototype.hasOwnProperty.call(diagram, "properties")
+          ? normalized.properties
+          : diagramProperties;
+        setDiagramProperties(nextProperties || []);
         setSelectedNodeId(null);
         setEditingNodeId(null);
       }
@@ -1270,6 +1543,9 @@ const App = () => {
       setChatLoading(false);
     }
   };
+
+  const propertyTarget = getPropertyTarget();
+  const propertyList = propertyTarget.properties || [];
 
   if (!auth?.token) {
     return (
@@ -1566,7 +1842,10 @@ const App = () => {
               removeAttribute: removeAttributeFromNode,
               removeMethod: removeMethodFromNode,
               renameNode,
-              deleteNode
+              deleteNode,
+              openPropertiesForClass,
+              openPropertiesForMember,
+              setPropertyPaneOpen
             }}
           >
             <ReactFlow
@@ -1583,6 +1862,16 @@ const App = () => {
               onNodeDoubleClick={(_, node) => {
                 setSelectedNodeId(node.id);
                 setEditingNodeId(node.id);
+                openPropertiesForClass(node.id);
+              }}
+              onEdgeDoubleClick={(_, edge) => {
+                openPropertiesForEdge(edge.id);
+              }}
+              zoomOnDoubleClick={false}
+              onPaneClick={(event) => {
+                if (event.detail === 2) {
+                  openPropertiesForDiagram();
+                }
               }}
               panOnScroll
               selectionOnDrag
@@ -1645,6 +1934,77 @@ const App = () => {
           aria-label="Resize panels"
         />
         <div className="chat-panel" style={{ width: `${100 - diagramWidth}%` }}>
+          {propertyPaneOpen && (
+            <div className="card properties-card">
+              <div className="properties-header">
+                <h2>Properties</h2>
+                <button className="small-btn secondary" onClick={() => setPropertyPaneOpen(false)}>
+                  Close
+                </button>
+              </div>
+              <div className="properties-title">
+                <span className="properties-scope">{propertyScope}</span>
+                <span className="muted">{propertyTarget.label}</span>
+              </div>
+              {!propertyScope ||
+              (propertyScope !== "diagram" &&
+                propertyScope !== "edge" &&
+                !propertyNodeId) ? (
+                <div className="muted">Add a class to edit properties.</div>
+              ) : (
+                <>
+                  <div className="properties-list">
+                    {propertyList.length === 0 && <div className="muted">No properties yet.</div>}
+                    {propertyList.map((prop, idx) => (
+                      <div key={idx} className="properties-row">
+                        <input
+                          type="text"
+                          placeholder="key"
+                          value={prop.key}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            updatePropertyList((list) =>
+                              list.map((item, i) => (i === idx ? { ...item, key: value } : item))
+                            );
+                          }}
+                        />
+                        <input
+                          type="text"
+                          placeholder="value"
+                          value={prop.value}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            updatePropertyList((list) =>
+                              list.map((item, i) => (i === idx ? { ...item, value } : item))
+                            );
+                          }}
+                        />
+                        <button
+                          className="small-btn secondary tiny"
+                          onClick={() =>
+                            updatePropertyList((list) => list.filter((_, i) => i !== idx))
+                          }
+                        >
+                          x
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="properties-actions">
+                    <button
+                      className="small-btn secondary"
+                      onClick={() =>
+                        updatePropertyList((list) => [...list, { key: "", value: "" }])
+                      }
+                    >
+                      Add Property
+                    </button>
+                    <span className="muted">{propertyTarget.label}</span>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
           <div className="card chat-card">
             <h2>Assistant</h2>
             <div className="chat-messages">

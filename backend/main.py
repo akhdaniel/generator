@@ -118,6 +118,7 @@ class DiagramPayload(BaseModel):
     nodes: list
     edges: list
     chatMessages: Optional[list] = None
+    properties: Optional[list] = None
 
 
 class AuthRequest(BaseModel):
@@ -526,6 +527,15 @@ def camel_to_snake(name: str) -> str:
 
 
 def parse_attribute(attr: str) -> tuple[str, str]:
+    if isinstance(attr, dict):
+        raw_name = str(attr.get("name") or "").strip()
+        raw_type = str(attr.get("type") or "").strip()
+        if not raw_type:
+            props = properties_to_map(attr.get("properties"))
+            raw_type = props.get("type", "").strip()
+        if raw_type:
+            return normalize_identifier(raw_name), raw_type.lower()
+        return parse_attribute(raw_name)
     if ":" in attr:
         left, right = attr.split(":", 1)
         return normalize_identifier(left.strip()), right.strip().lower()
@@ -559,6 +569,88 @@ def odoo_field_for(typ: str) -> str:
     if typ in {"datetime", "timestamp"}:
         return "fields.Datetime()"
     return "fields.Char()"
+
+
+def properties_to_map(properties) -> dict:
+    if not properties:
+        return {}
+    if isinstance(properties, dict):
+        return {str(k).strip(): "" if v is None else str(v).strip() for k, v in properties.items()}
+    if isinstance(properties, list):
+        out = {}
+        for item in properties:
+            if not isinstance(item, dict):
+                continue
+            if "key" in item:
+                key = str(item.get("key") or "").strip()
+                value = "" if item.get("value") is None else str(item.get("value")).strip()
+            elif len(item) == 1:
+                key, value = next(iter(item.items()))
+                key = str(key).strip()
+                value = "" if value is None else str(value).strip()
+            else:
+                continue
+            if key:
+                out[key] = value
+        return out
+    return {}
+
+
+def truthy_value(value: str) -> bool:
+    return str(value).strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def odoo_literal(value: str) -> str:
+    text = str(value).strip()
+    lowered = text.lower()
+    if lowered in {"true", "false"}:
+        return "True" if lowered == "true" else "False"
+    if text and text.replace(".", "", 1).lstrip("-").isdigit():
+        return text
+    escaped = text.replace("'", "\\'")
+    return f"'{escaped}'"
+
+
+def odoo_field_options(props: dict) -> str:
+    if not props:
+        return ""
+    options = []
+    for key, value in props.items():
+        if key in {"type", "depends", "onchange"}:
+            continue
+        if key == "label" and "string" not in props:
+            options.append(f"string={odoo_literal(value)}")
+            continue
+        if key in {"readonly", "required"} and value == "":
+            options.append(f"{key}=True")
+            continue
+        options.append(f"{key}={odoo_literal(value)}")
+    return f", {', '.join(options)}" if options else ""
+
+
+def parse_depends(value: str) -> list:
+    if not value:
+        return []
+    parts = [v.strip() for v in str(value).split(",") if v.strip()]
+    return parts
+
+
+def normalize_method_name(name: str) -> str:
+    cleaned = name.strip()
+    if "(" in cleaned:
+        cleaned = cleaned.split("(", 1)[0].strip()
+    cleaned = cleaned.split()[0] if cleaned else "method"
+    return normalize_identifier(cleaned)
+
+
+def odoo_field_call(typ: str, props: dict) -> str:
+    base = odoo_field_for(typ)
+    options = odoo_field_options(props)
+    if not options:
+        return base
+    if base.endswith(")"):
+        return f"{base[:-1]}{options})"
+    return f"{base}{options}"
 
 
 def read_template(folder: str, name: str) -> str:
@@ -767,16 +859,65 @@ def write_odoo_addon(diagram: dict, root: Path, version: str) -> list:
     templates = get_odoo_templates(version)
     nodes = diagram.get("nodes", [])
     edges = diagram.get("edges", [])
+    diagram_props = properties_to_map(diagram.get("properties"))
     model_map = {n["id"]: camel_to_snake(n.get("data", {}).get("name", "class")) for n in nodes}
     class_map = {n["id"]: n.get("data", {}).get("name", "Class") for n in nodes}
     fields_map = {model: [] for model in model_map.values()}
+    methods_map = {model: [] for model in model_map.values()}
+    inherit_map = {model: "" for model in model_map.values()}
+    description_map = {model: "" for model in model_map.values()}
 
     for node in nodes:
         model = model_map[node["id"]]
         attrs = node.get("data", {}).get("attributes", [])
+        class_props = properties_to_map(node.get("data", {}).get("properties"))
+        description_map[model] = class_props.get("label") or class_map[node["id"]]
+        inherit_list = []
+        inherit_raw = class_props.get("inherit") or class_props.get("inherits") or ""
+        if inherit_raw:
+            inherit_list.extend([part.strip() for part in inherit_raw.split(",") if part.strip()])
+        if truthy_value(class_props.get("inherit_mail", "")):
+            inherit_list.append("mail.thread")
+        if truthy_value(class_props.get("inherit_image_mixin", "")):
+            inherit_list.append("image.mixin")
+        if inherit_list:
+            if len(inherit_list) == 1:
+                inherit_map[model] = f"    _inherit = '{inherit_list[0]}'"
+            else:
+                joined = ", ".join([f"'{item}'" for item in inherit_list])
+                inherit_map[model] = f"    _inherit = [{joined}]"
         for attr in attrs:
+            props = properties_to_map(attr.get("properties")) if isinstance(attr, dict) else {}
             name, typ = parse_attribute(attr)
-            fields_map[model].append(f"    {name} = {odoo_field_for(typ)}")
+            fields_map[model].append(f"    {name} = {odoo_field_call(typ, props)}")
+        methods = node.get("data", {}).get("methods", [])
+        for method in methods:
+            if isinstance(method, dict):
+                raw_name = str(method.get("name") or "").strip()
+                props = properties_to_map(method.get("properties"))
+            else:
+                raw_name = str(method).strip()
+                props = {}
+            if not raw_name:
+                continue
+            method_name = normalize_method_name(raw_name)
+            decorators = []
+            depends = parse_depends(props.get("depends", ""))
+            if depends:
+                deps = ", ".join([odoo_literal(item) for item in depends])
+                decorators.append(f"    @api.depends({deps})")
+            onchange = parse_depends(props.get("onchange", ""))
+            if onchange:
+                onchange_args = ", ".join([odoo_literal(item) for item in onchange])
+                decorators.append(f"    @api.onchange({onchange_args})")
+            lines = []
+            lines.extend(decorators)
+            lines.append(f"    def {method_name}(self):")
+            label = props.get("label", "")
+            if label:
+                lines.append(f"        \"\"\"{label}\"\"\"")
+            lines.append("        pass")
+            methods_map[model].append("\n".join(lines))
 
     for edge in edges:
         data = edge.get("data", {})
@@ -819,9 +960,15 @@ def write_odoo_addon(diagram: dict, root: Path, version: str) -> list:
     (root / "security").mkdir(parents=True, exist_ok=True)
 
     view_entries = "\n".join([f"        'views/{model}_views.xml'," for model in model_map.values()])
+    addon_name = diagram_props.get("name") or "Generated UML Addon"
+    addon_version = diagram_props.get("version") or "1.0.0"
+    depends_raw = diagram_props.get("depends") or ""
+    depends_list = [part.strip() for part in depends_raw.split(",") if part.strip()] or ["base"]
+    depends_literal = f"[{', '.join([repr(item) for item in depends_list])}]"
     manifest = templates["manifest"].format(
-        addon_name="Generated UML Addon",
-        version="1.0.0",
+        addon_name=addon_name,
+        version=addon_version,
+        depends=depends_literal,
         view_entries=view_entries,
     )
 
@@ -839,10 +986,16 @@ def write_odoo_addon(diagram: dict, root: Path, version: str) -> list:
     for node_id, model in model_map.items():
         class_name = class_map[node_id]
         field_lines = fields_map[model] or ["    name = fields.Char()"]
+        method_blocks = "\n\n".join(methods_map[model])
+        if method_blocks:
+            method_blocks = f"\n\n{method_blocks}"
         model_content = templates["model"].format(
             class_name=class_name,
             model_name=model,
+            description=description_map.get(model) or class_name,
+            inherit_line=inherit_map.get(model, ""),
             fields="\n".join(field_lines),
+            method_blocks=method_blocks,
         )
         (root / "models" / f"{model}.py").write_text(model_content, encoding="utf-8")
         files_written.append(f"models/{model}.py")
