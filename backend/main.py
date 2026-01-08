@@ -670,6 +670,7 @@ def read_sql_template(dialect: str, name: str) -> str:
 def get_odoo_templates(version: str) -> dict:
     return {
         "manifest": read_template(f"odoo-{version}", "manifest.tmpl"),
+        "menu": read_template(f"odoo-{version}", "menu.tmpl"),
         "model": read_template(f"odoo-{version}", "model.py.tmpl"),
         "view": read_template(f"odoo-{version}", "view.xml.tmpl"),
         "access": read_template(f"odoo-{version}", "access.csv.tmpl"),
@@ -959,8 +960,10 @@ def write_odoo_addon(diagram: dict, root: Path, version: str) -> list:
     (root / "views").mkdir(parents=True, exist_ok=True)
     (root / "security").mkdir(parents=True, exist_ok=True)
 
-    view_entries = "\n".join([f"        'views/{model}_views.xml'," for model in model_map.values()])
+    view_entries = "        'views/menu.xml',\n"
+    view_entries += "\n".join([f"        'views/{model}_views.xml'," for model in model_map.values()])
     addon_name = diagram_props.get("name") or "Generated UML Addon"
+    folder_name = diagram_props.get("folder_name") or "vit_my_addon"
     addon_version = diagram_props.get("version") or "1.0.0"
     depends_raw = diagram_props.get("depends") or ""
     depends_list = [part.strip() for part in depends_raw.split(",") if part.strip()] or ["base"]
@@ -970,6 +973,10 @@ def write_odoo_addon(diagram: dict, root: Path, version: str) -> list:
         version=addon_version,
         depends=depends_literal,
         view_entries=view_entries,
+    )
+    menu = templates["menu"].format(
+        addon_name=addon_name,
+        folder_name=folder_name
     )
 
     files_written = []
@@ -982,6 +989,9 @@ def write_odoo_addon(diagram: dict, root: Path, version: str) -> list:
         encoding="utf-8",
     )
     files_written.append("models/__init__.py")
+
+    (root / "views" / "menu.xml").write_text(menu, encoding="utf-8")
+    files_written.append("views/menu.xml")
 
     for node_id, model in model_map.items():
         class_name = class_map[node_id]
