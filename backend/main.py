@@ -558,6 +558,7 @@ def sql_type_for(typ: str) -> str:
 
 
 def odoo_field_for(typ: str) -> str:
+    # print('typ', typ)
     if typ in {"int", "integer", "number"}:
         return "fields.Integer()"
     if typ in {"float", "double", "decimal"}:
@@ -569,6 +570,34 @@ def odoo_field_for(typ: str) -> str:
     if typ in {"datetime", "timestamp"}:
         return "fields.Datetime()"
     return "fields.Char()"
+
+
+def pluralize_snake(name: str) -> str:
+    if not name:
+        return name
+    parts = name.split("_")
+    word = parts[-1]
+    if word.endswith(("s", "x", "z", "ch", "sh")):
+        plural = f"{word}es"
+    elif len(word) > 1 and word.endswith("y") and word[-2] not in "aeiou":
+        plural = f"{word[:-1]}ies"
+    else:
+        plural = f"{word}s"
+    parts[-1] = plural
+    return "_".join(parts)
+
+
+def odoo_field_label(name: str) -> str:
+    raw = camel_to_snake(name)
+    if raw.endswith("_ids"):
+        base = pluralize_snake(raw[:-4])
+    elif raw.endswith("_id"):
+        base = raw[:-3]
+    else:
+        base = raw
+    if not base:
+        base = "field"
+    return base.replace("_", " ").title()
 
 
 def properties_to_map(properties) -> dict:
@@ -643,11 +672,13 @@ def normalize_method_name(name: str) -> str:
     return normalize_identifier(cleaned)
 
 
-def odoo_field_call(typ: str, props: dict) -> str:
-    base = odoo_field_for(typ)
+def odoo_field_call(name: str, typ: str, props: dict) -> str:
+    base = odoo_field_for( typ) # fields.Integer()
     options = odoo_field_options(props)
+    print(base, options)
+    field_string = odoo_field_label(name)
     if not options:
-        return base
+        return f"{base[:-1]} string='{field_string}' )"
     if base.endswith(")"):
         return f"{base[:-1]}{options})"
     return f"{base}{options}"
@@ -758,6 +789,7 @@ def diagram_to_odoo(diagram: dict) -> str:
         attrs = node.get("data", {}).get("attributes", [])
         for attr in attrs:
             name, typ = parse_attribute(attr)
+            name = camel_to_snake(name)
             fields_map[model].append(f"    {name} = {odoo_field_for(typ)}")
 
     for edge in edges:
@@ -770,8 +802,8 @@ def diagram_to_odoo(diagram: dict) -> str:
         target_model = model_map[target_id]
         source_mult = data.get("sourceMultiplicity")
         target_mult = data.get("targetMultiplicity")
-        source_role = normalize_identifier((data.get("sourceRole") or f"{target_model}_id"))
-        target_role = normalize_identifier((data.get("targetRole") or f"{source_model}_ids"))
+        source_role = camel_to_snake((data.get("sourceRole") or f"{target_model}_id"))
+        target_role = camel_to_snake((data.get("targetRole") or f"{source_model}_ids"))
 
         if source_mult == "many2many" or target_mult == "many2many":
             rel_table = f"{source_model}_{target_model}_rel"
@@ -861,7 +893,9 @@ def write_odoo_addon(diagram: dict, root: Path, version: str) -> list:
     nodes = diagram.get("nodes", [])
     edges = diagram.get("edges", [])
     diagram_props = properties_to_map(diagram.get("properties"))
+
     model_map = {n["id"]: camel_to_snake(n.get("data", {}).get("name", "class")) for n in nodes}
+    print(model_map)
     class_map = {n["id"]: n.get("data", {}).get("name", "Class") for n in nodes}
     fields_map = {model: [] for model in model_map.values()}
     methods_map = {model: [] for model in model_map.values()}
@@ -890,7 +924,8 @@ def write_odoo_addon(diagram: dict, root: Path, version: str) -> list:
         for attr in attrs:
             props = properties_to_map(attr.get("properties")) if isinstance(attr, dict) else {}
             name, typ = parse_attribute(attr)
-            fields_map[model].append(f"    {name} = {odoo_field_call(typ, props)}")
+            name = camel_to_snake(name)
+            fields_map[model].append(f"    {name} = {odoo_field_call(name, typ, props)}")
         methods = node.get("data", {}).get("methods", [])
         for method in methods:
             if isinstance(method, dict):
@@ -928,10 +963,14 @@ def write_odoo_addon(diagram: dict, root: Path, version: str) -> list:
             continue
         source_model = model_map[source_id]
         target_model = model_map[target_id]
+
+        source_string = odoo_field_label(source_model)
+        target_string = odoo_field_label(target_model)
+
         source_mult = data.get("sourceMultiplicity")
         target_mult = data.get("targetMultiplicity")
-        source_role = normalize_identifier((data.get("sourceRole") or f"{target_model}_id"))
-        target_role = normalize_identifier((data.get("targetRole") or f"{source_model}_ids"))
+        source_role = camel_to_snake((data.get("sourceRole") or f"{target_model}_id"))
+        target_role = camel_to_snake((data.get("targetRole") or f"{source_model}_ids"))
 
         if source_mult == "many2many" or target_mult == "many2many":
             rel_table = f"{source_model}_{target_model}_rel"
@@ -943,17 +982,17 @@ def write_odoo_addon(diagram: dict, root: Path, version: str) -> list:
             )
         elif source_mult == "many2one" or target_mult == "one2many":
             fields_map[source_model].append(
-                f"    {source_role} = fields.Many2one('{target_model}')"
+                f"    {source_role} = fields.Many2one(string='{target_string}', comodel_name='{target_model}')"
             )
             fields_map[target_model].append(
-                f"    {target_role} = fields.One2many('{source_model}', '{source_role}')"
+                f"    {target_role} = fields.One2many(string='{source_string}', comodel_name='{source_model}', inverse_name='{source_role}')"
             )
         elif target_mult == "many2one" or source_mult == "one2many":
             fields_map[target_model].append(
-                f"    {source_role} = fields.Many2one('{source_model}')"
+                f"    {source_role} = fields.Many2one(string='{target_string}',comodel_name='{source_model}')"
             )
             fields_map[source_model].append(
-                f"    {target_role} = fields.One2many('{target_model}', '{source_role}')"
+                f"    {target_role} = fields.One2many(string='{source_string}', comodel_name='{target_model}', inverse_name='{source_role}')"
             )
 
     (root / "models").mkdir(parents=True, exist_ok=True)
@@ -963,6 +1002,7 @@ def write_odoo_addon(diagram: dict, root: Path, version: str) -> list:
     view_entries = "        'views/menu.xml',\n"
     view_entries += "\n".join([f"        'views/{model}_views.xml'," for model in model_map.values()])
     addon_name = diagram_props.get("name") or "Generated UML Addon"
+    namespace = diagram_props.get("namespace") or "vit"
     folder_name = diagram_props.get("folder_name") or "vit_my_addon"
     addon_version = diagram_props.get("version") or "1.0.0"
     depends_raw = diagram_props.get("depends") or ""
@@ -973,6 +1013,7 @@ def write_odoo_addon(diagram: dict, root: Path, version: str) -> list:
         version=addon_version,
         depends=depends_literal,
         view_entries=view_entries,
+        namespace=namespace,
     )
     menu = templates["menu"].format(
         addon_name=addon_name,
@@ -1000,6 +1041,7 @@ def write_odoo_addon(diagram: dict, root: Path, version: str) -> list:
         if method_blocks:
             method_blocks = f"\n\n{method_blocks}"
         model_content = templates["model"].format(
+            namespace=namespace,
             class_name=class_name,
             model_name=model,
             description=description_map.get(model) or class_name,
@@ -1017,6 +1059,8 @@ def write_odoo_addon(diagram: dict, root: Path, version: str) -> list:
             model=model,
             tree_fields=tree_fields,
             form_fields=form_fields,
+            namespace=namespace,
+            folder_name=folder_name
         )
         (root / "views" / f"{model}_views.xml").write_text(view_xml, encoding="utf-8")
         files_written.append(f"views/{model}_views.xml")

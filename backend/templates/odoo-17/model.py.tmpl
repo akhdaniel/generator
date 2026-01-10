@@ -1,8 +1,9 @@
 from odoo import models, fields, api
 
 class {class_name}(models.Model):
-    _name = '{model_name}'
+    _name = '{namespace}.{model_name}'
     _description = '{description}'
 {inherit_line}
 
-{fields}{method_blocks}
+{fields}
+{method_blocks}
